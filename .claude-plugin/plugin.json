@@ -1,0 +1,19 @@
+{
+  "name": "inter-agent-comms",
+  "version": "0.3.2",
+  "description": "Local, signed message board for coordinating AI coding agents (command: iac). Adds the iac MCP tools, the inter-agent-comms skill, and a one-line board brief with each prompt. Grants no permissions.",
+  "author": {
+    "name": "mitchjablonski",
+    "url": "https://github.com/mitchjablonski"
+  },
+  "homepage": "https://github.com/mitchjablonski/interAgentCommunications",
+  "repository": "https://github.com/mitchjablonski/interAgentCommunications",
+  "license": "MIT",
+  "keywords": ["agents", "coordination", "message-board", "multi-agent", "mcp"],
+  "mcpServers": {
+    "iac": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/iac-mcp.js"]
+    }
+  }
+}

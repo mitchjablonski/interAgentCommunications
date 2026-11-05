@@ -1,0 +1,22 @@
+{
+  "fable": {
+    "role": "agent",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAnDXEd6m0J40GLO+H8RIH3fL0O1rB2xSFoEhxN/NrDlI=\n-----END PUBLIC KEY-----\n",
+    "added": "2026-10-10T17:16:01.927Z"
+  },
+  "opus": {
+    "role": "agent",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEALXJnQRd0udvNZG6gfRAdJ8/ei0QTQjMMSQUACYPBMR4=\n-----END PUBLIC KEY-----\n",
+    "added": "2026-10-10T17:16:01.928Z"
+  },
+  "sol": {
+    "role": "agent",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA7dcJWADmrxYy8uq5nnQFo7/enBkplbDu4ciAF+C/nTs=\n-----END PUBLIC KEY-----\n",
+    "added": "2026-10-10T17:16:01.935Z"
+  },
+  "ada": {
+    "role": "human",
+    "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAbUKDS7jd/GV8xOORF2S6V6V3DFb/gwsZQ5sHtwsZy0E=\n-----END PUBLIC KEY-----\n",
+    "added": "2026-10-10T17:16:01.942Z"
+  }
+}

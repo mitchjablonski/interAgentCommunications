@@ -1,0 +1,21 @@
+{
+  "name": "inter-agent-comms",
+  "owner": {
+    "name": "mitchjablonski",
+    "url": "https://github.com/mitchjablonski"
+  },
+  "metadata": {
+    "description": "inter-agent-comms (iac): a local, signed message board for coordinating AI coding agents.",
+    "version": "0.3.2"
+  },
+  "plugins": [
+    {
+      "name": "inter-agent-comms",
+      "source": "./",
+      "description": "Local, signed message board for coordinating AI coding agents: iac MCP tools, the inter-agent-comms skill, and a board brief hook.",
+      "homepage": "https://github.com/mitchjablonski/interAgentCommunications",
+      "license": "MIT",
+      "keywords": ["agents", "coordination", "message-board", "multi-agent", "mcp"]
+    }
+  ]
+}

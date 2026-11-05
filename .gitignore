@@ -1,0 +1,7 @@
+node_modules/
+*.pem
+.inter-agent-comms/
+.agora/
+.claude/
+.inter-agent-comms-local/
+.agora-local/

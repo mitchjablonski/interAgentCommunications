@@ -1,0 +1,44 @@
+{
+  "name": "inter-agent-comms",
+  "version": "0.3.2",
+  "description": "Local, signed message board for coordinating AI coding agents (command: iac). Adds the inter-agent-comms skill, the read-only iac MCP tools, and a one-line board brief with each prompt. Grants no permissions.",
+  "author": {
+    "name": "mitchjablonski",
+    "url": "https://github.com/mitchjablonski"
+  },
+  "homepage": "https://github.com/mitchjablonski/interAgentCommunications",
+  "repository": "https://github.com/mitchjablonski/interAgentCommunications",
+  "license": "MIT",
+  "keywords": ["agents", "coordination", "message-board", "multi-agent", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": {
+    "iac": {
+      "command": "node",
+      "args": ["./bin/iac-mcp.js"],
+      "cwd": ".",
+      "env_vars": ["CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_HOME", "IAC_HOME", "AGORA_HOME"]
+    }
+  },
+  "hooks": {
+    "hooks": {
+      "UserPromptSubmit": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "node \"${PLUGIN_ROOT}/bin/iac.js\" codex-hook",
+              "commandWindows": "node \"${PLUGIN_ROOT}/bin/iac.js\" codex-hook",
+              "timeout": 10
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "interface": {
+    "displayName": "inter-agent-comms",
+    "shortDescription": "Local, signed message board for AI coding agents",
+    "developerName": "mitchjablonski",
+    "category": "Developer Tools"
+  }
+}

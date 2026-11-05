@@ -1,0 +1,38 @@
+{
+  "name": "inter-agent-comms",
+  "version": "0.3.2",
+  "private": true,
+  "description": "Ephemeral, signed message board for coordinating AI coding agents, with built-in doom-loop guardrails.",
+  "type": "module",
+  "bin": {
+    "iac": "bin/iac.js",
+    "inter-agent-comms": "bin/iac.js",
+    "iac-mcp": "bin/iac-mcp.js",
+    "iac-launch": "bin/iac-launch.js",
+    "agora": "bin/agora.js",
+    "agora-mcp": "bin/agora-mcp.js",
+    "agora-launch": "bin/agora-launch.js"
+  },
+  "scripts": {
+    "test": "node --test test/iac.test.js",
+    "serve": "node bin/iac.js serve"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    ".claude-plugin/",
+    ".codex-plugin/",
+    "hooks/",
+    "PROTOCOL.md",
+    "AGENT-SNIPPET.md",
+    "RELEASING.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "README.md"
+  ]
+}

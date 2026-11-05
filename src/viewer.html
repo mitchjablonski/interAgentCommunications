@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>inter-agent-comms</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1b1b1b; --muted:#6b6b6b; --panel:#fff; --line:#e3e3df; --accent:#3b5bdb; --warn:#b54708; --bad:#b42318; --ok:#067647; --chip:#eef0f4; --selbg:#e8edfb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141414; --fg:#ececec; --muted:#9a9a9a; --panel:#1e1e1e; --line:#2e2e2e; --accent:#7c9cff; --warn:#f2a54a; --bad:#f97066; --ok:#4cd37a; --chip:#2a2a2a; --selbg:#22304f; } }
+  section h1.title { font-size:18px; margin:6px 0; padding-left:10px; border-left:4px solid var(--accent); }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  header { display:flex; gap:16px; align-items:baseline; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:2; }
+  header h1 { font-size:16px; margin:0; }
+  header .muted { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 42px); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } aside { border-right:0; border-bottom:1px solid var(--line);} }
+  aside { border-right:1px solid var(--line); background:var(--panel); overflow:auto; }
+  aside h2, section h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:14px 12px 6px; }
+  .tl { list-style:none; margin:0; padding:0; }
+  .tl li { padding:8px 12px 8px 9px; border-top:1px solid var(--line); border-left:3px solid transparent; cursor:pointer; }
+  .tl li:hover { background:var(--bg); }
+  .tl li.sel { background:var(--selbg); border-left-color:var(--accent); }
+  .tl li.sel .t { color:var(--accent); }
+  .tl li.sel .t::before { content:'▶ '; font-size:10px; }
+  .tl .t { font-weight:600; }
+  .tl .m { color:var(--muted); font-size:12px; }
+  .wait { margin:0 12px 8px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:12px; background:var(--bg); }
+  .wait b { color:var(--warn); }
+  .wait.is-stalled { border-color:var(--bad); }
+  .stalled { color:var(--bad); font-weight:700; }
+  .waits > summary .stalled { text-transform:none; }
+  .stallnote { margin:0 12px 8px; font-size:12px; border-left-color:var(--bad); }
+  .waits > summary { cursor:pointer; user-select:none; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:14px 12px 6px; }
+  .waits > summary::marker { color:var(--muted); }
+  section { padding:12px 18px 40px; max-width: 960px; }
+  .status { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; font-weight:600; background:var(--chip); }
+  .status.open { color:var(--ok);} .status.locked { color:var(--bad);} .status.cooldown { color:var(--warn);} .status.closed { color:var(--muted);} .status.idle { color:var(--muted);} .status.damaged { color:var(--bad);}
+  .banner { padding:8px 12px; border-left:3px solid var(--warn); background:var(--panel); margin:10px 0; border-radius:4px; }
+  .post { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; margin:10px 0; }
+  .post .h { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .post .h .a { font-weight:700; color:var(--fg); font-size:13px; }
+  .kind { padding:0 7px; border-radius:4px; background:var(--chip); font-weight:600; }
+  .kind.objection { color:var(--bad);} .kind.proposal { color:var(--accent);} .kind.resolution { color:var(--ok);} .kind.handoff { color:var(--warn);}
+  .sig.ok { color:var(--ok);} .sig.bad { color:var(--bad); font-weight:700; }
+  .body { white-space:pre-wrap; word-break:break-word; }
+  .compose { border-top:1px solid var(--line); margin-top:20px; padding-top:12px; }
+  .compose textarea, .compose input, .compose select { width:100%; background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
+  .compose textarea { min-height:90px; }
+  .row { display:flex; gap:8px; margin:6px 0; flex-wrap:wrap; } .row > * { flex:1; min-width:120px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:7px 12px; font:inherit; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  .err { color:var(--bad); font-size:12px; white-space:pre-wrap; }
+  .empty { color:var(--muted); padding:30px 12px; }
+  code { background:var(--chip); padding:0 4px; border-radius:3px; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>inter-agent-comms</h1>
+  <select id="proj" title="project" style="background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 6px;font:inherit"></select>
+  <label class="muted" style="font-size:12px" title="threads quiet for threadIdleCloseDays with no wait"><input type="checkbox" id="showidle"> show idle</label> <span class="muted" id="meta">loading…</span>
+  <span class="muted" style="margin-left:auto"><button class="ghost" id="newBtn">+ thread</button> <button class="ghost" id="gcBtn" title="delete expired threads">gc</button></span>
+</header>
+<main>
+  <aside>
+    <div id="waiting"></div>
+    <h2>threads</h2>
+    <ul class="tl" id="threads"></ul>
+  </aside>
+  <section id="view"><div class="empty">Select a thread.</div></section>
+</main>
+<script>
+const $ = (s, r=document) => r.querySelector(s);
+const NONCE = '__IAC_NONCE__';   // minted per server start; writes are refused without it
+let state = null, sel = null, composeOpen = false;
+let proj = 'all'; try { proj = localStorage.getItem('iac.project') || 'all'; } catch {}
+let waitsOpen = true; try { const saved = localStorage.getItem('iac.waiting.open'); if (saved !== null) waitsOpen = saved === '1'; } catch {}
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ago = (ts) => { const d = (Date.now() - Date.parse(ts))/1000; if (d<60) return `${d|0}s`; if (d<3600) return `${d/60|0}m`; if (d<86400) return `${d/3600|0}h`; return `${d/86400|0}d`; };
+
+async function load() {
+  try {
+    const r = await fetch('/api/state'); state = await r.json();
+    if (!sel && state.threads[0]) sel = state.threads[0].id;
+    render();
+  } catch (e) { $('#meta').textContent = 'disconnected: ' + e.message; }
+}
+function render() {
+  const agents = Object.entries(state.registry).map(([k,v]) => k===state.human ? `${k} (you)` : k).join(', ');
+  const projects = [...new Set(state.threads.map(t => t.project || 'unscoped'))].sort();
+  if (!projects.includes(proj) && proj !== 'all') proj = 'all';
+  $('#proj').innerHTML = `<option value="all">All projects (${state.threads.length})</option>` + projects.map(p => `<option value="${esc(p)}" ${p===proj?'selected':''}>${esc(p)} (${state.threads.filter(t=>(t.project||'unscoped')===p).length})</option>`).join('');
+  const showIdle = $('#showidle').checked;
+  const visible = (proj === 'all' ? state.threads : state.threads.filter(t => (t.project||'unscoped') === proj)).filter(t => showIdle || !t.idle);
+  if (sel && !visible.some(t => t.id === sel)) sel = visible[0]?.id || null;
+  $('#meta').textContent = `${visible.filter(t=>!t.closed&&!t.idle).length} open${visible.some(t=>t.idle)?`, ${visible.filter(t=>t.idle).length} idle`:''} · agents: ${agents} · refreshes every 4s · server v${state.server?.version||'?'} up since ${state.server?.startedAt ? new Date(state.server.startedAt).toLocaleTimeString() : '?'}`;
+  const stalledW = state.waiting.filter(w => w.stalled), stalledN = stalledW.length;
+  const stalledProjects = [...new Set(stalledW.map(w => w.project==='global' ? `${w.on} in any project` : `${w.on} in ${w.project||'unscoped'}`))].join(', ');
+  $('#waiting').innerHTML = state.waiting.length ? `<details class="waits" ${waitsOpen?'open':''}><summary>waiting on (all projects) · ${state.waiting.length}${stalledN?` · <span class="stalled">${stalledN} stalled</span>`:''}</summary>` + (stalledN ? `<div class="banner stallnote">${stalledN} stalled — nobody has picked ${stalledN>1?'these':'this'} up for over ${esc(state.limits.stallHours)}h, so no session of that family is likely running there: ${esc(stalledProjects)}. Start one there.</div>` : '') + [...state.waiting].sort((a,b) => (b.stalled?1:0) - (a.stalled?1:0)).map(w =>
+    `<div class="wait${w.stalled?' is-stalled':''}">${w.stalled?`<span class="stalled" title="unclaimed for over ${esc(state.limits.stallHours)}h">stalled ${Math.floor(w.ageHours)}h</span> `:''}<b>${esc(w.from)}</b> → <b>${esc(w.on)}</b> <span title="any ${esc(w.on)} instance working in this project">in <code>${esc(w.project||'unscoped')}</code></span>${w.claimedBy?` · claimed by <code>${esc(w.claimedBy)}</code>`:w.stalled?` · no ${esc(w.on)} session has picked this up — start one ${w.project==='global'?'in any project':`in <code>${esc(w.project||'unscoped')}</code>`}`:' · unclaimed'} · <a href="#" data-t="${w.thread}">${esc(w.thread)}</a> · ${ago(w.since)} ago · <button class="ghost" data-unwait data-thread="${esc(w.thread)}" data-post="${esc(w.post)}" data-on="${esc(w.on)}" title="append a signed human cleanup event">clear</button><br>${esc(w.body.split('\n')[0].slice(0,120))}</div>`).join('') + '</details>' : '';
+  $('#waiting details')?.addEventListener('toggle', (e) => { waitsOpen = e.currentTarget.open; try { localStorage.setItem('iac.waiting.open', waitsOpen ? '1' : '0'); } catch {} });
+  document.querySelectorAll('[data-unwait]').forEach(b => b.onclick = async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const reason = prompt(`Why clear wait ${b.dataset.post}/${b.dataset.on}?`, 'No longer waiting.');
+    if (reason === null) return;
+    try { await api('/api/action', { action:'unwait', thread:b.dataset.thread, post:b.dataset.post, on:b.dataset.on, reason }); await load(); } catch (err) { alert(err.message); }
+  });
+  $('#threads').innerHTML = visible.map(t => `<li data-t="${t.id}" class="${t.id===sel?'sel':''}">
+    <div class="t">${esc(t.title)}</div>
+    <div class="m"><span class="status ${t.status}">${t.status}</span> ${proj==='all' ? `<code>${esc(t.project||'unscoped')}</code> · ` : ''}${t.id} · ${t.posts.length} posts · ${t.participants.map(esc).join(', ')} · ${ago(t.lastActivity)} ago${t.verified?'':' · <span class="sig bad">✗ sig</span>'}</div></li>`).join('') || '<li class="empty">no threads</li>';
+  document.querySelectorAll('[data-t]').forEach(el => el.onclick = (e) => { e.preventDefault(); sel = el.dataset.t; composeOpen = false;
+    const t = state.threads.find(x => x.id === sel); if (t && proj !== 'all' && (t.project||'unscoped') !== proj) { proj = 'all'; try { localStorage.setItem('iac.project', proj); } catch {} }
+    render(); });
+  const t = state.threads.find(x => x.id === sel);
+  $('#view').innerHTML = composeOpen === 'new' ? composeNew() : t ? thread(t) : '<div class="empty">Select a thread.</div>';
+  wire(t);
+}
+function thread(t) {
+  const banners = [];
+  if (t.locked) banners.push(`🔒 locked: ${esc(t.lockReason)}`);
+  if (t.cooldown?.active) banners.push(`⏸ ping-pong: ${t.cooldown.authors.join(' & ')} are frozen until a third party or you posts. Escalate if it needs a decision.`);
+  if (t.issueUrl) banners.push(`↗ escalated to <a href="${esc(t.issueUrl)}" target="_blank">${esc(t.issueUrl)}</a>`);
+  if (t.idle) banners.push(`idle since ${new Date(t.idleSince).toLocaleString()} · any post revives it`);
+  if (t.closed) banners.push(`closed · will be deleted at ${new Date(t.expiresAt).toLocaleString()}`);
+  return `<h1 class="title">${esc(t.title)}</h1>
+  <div class="muted" style="font-size:12px;color:var(--muted)"><span class="status ${t.status}">${t.status}</span> <code>${esc(t.project||'unscoped')}</code> · ${t.id} · opened by <b>${esc(t.opener)}</b> ${ago(t.created)} ago · expires ${new Date(t.expiresAt).toLocaleString()}
+    ${!t.closed ? ` · <button class="ghost" data-act="${t.locked?'unlock':'lock'}">${t.locked?'unlock':'lock'}</button> <button class="ghost" data-act="close">close</button> <button class="ghost" data-act="set-project" title="assign or change project">${(t.project||'unscoped')==='unscoped'?'set project':'re-tag'}</button>` : ''}</div>
+  ${banners.map(b => `<div class="banner">${b}</div>`).join('')}
+  ${t.posts.map(p => `<div class="post" id="${p.id}">
+    <div class="h"><span class="a">${esc(p.author)}</span>${p.instance && p.instance!==`${p.author}@${t.project}` ? `<code title="instance label (self-declared, signed by the family key)">${esc(p.instance)}</code>` : ''}<span class="kind ${p.kind}">${p.kind}</span>${p.idSource==='self'?'<span title="identity was chosen at the command line, not attested by a launcher or the harness" style="color:var(--warn)">self-id</span>':''}<span title="${p.ts}">${ago(p.ts)} ago</span><span>${p.id}</span>
+      ${p.re ? `<a href="#${p.re}">re ${p.re}</a>` : ''}${(p.mentions||[]).map(m=>`<span>@${esc(m)}</span>`).join('')}
+      ${(p.waitingOn||[]).length ? `<span style="color:var(--warn)" title="names a family within this project; the first instance to ack claims it">⏳ waiting on ${p.waitingOn.map(esc).join(', ')} in ${esc(t.project)}</span>` : ''}
+      <span class="sig ${p.verified?'ok':'bad'}" title="Ed25519 signature ${p.verified?'verified':'FAILED'}">${p.verified?'✓ signed':'✗ UNVERIFIED'}</span></div>
+    <div class="body">${esc(p.body)}</div></div>`).join('')}
+  ${(t.waitClears||[]).map(c => `<div class="post" id="${c.id}"><div class="h"><span class="a">${esc(c.author)}</span><span class="kind status">wait cleared</span><span>${ago(c.ts)} ago</span><span>${esc(c.id)}</span><span class="sig ${c.verified?'ok':'bad'}">${c.verified?'✓ signed':'✗ UNVERIFIED'}</span></div><div class="body"><code>${esc(c.post)}/${esc(c.on)}</code> · ${esc(c.reason)}</div></div>`).join('')}
+  ${t.closed ? '' : `<div class="compose"><div class="row"><select id="kind">${['answer','question','proposal','objection','status','ack','handoff','resolution'].map(k=>`<option>${k}</option>`).join('')}</select>
+    <input id="re" placeholder="re: post id (required for objection)"><input id="wo" placeholder="waiting on (comma names)"></div>
+    <textarea id="body" placeholder="Post as ${esc(state.human)}. @name to mention."></textarea>
+    <div class="row"><button id="send">post</button></div><div class="err" id="err"></div></div>`}`;
+}
+function composeNew() {
+  return `<h1 style="font-size:18px;margin:6px 0">New thread</h1><div class="compose">
+   <div class="row"><input id="title" placeholder="title (≤ ${state.limits.titleMax} chars)"><select id="kind"><option>question</option><option>proposal</option><option>status</option><option>handoff</option></select><input id="wo" placeholder="waiting on (comma names)"><input id="project" placeholder="project" value="${esc(proj==='all'?'global':proj)}"></div>
+   <textarea id="body" placeholder="Body. @name to mention."></textarea>
+   <div class="row"><button id="send">open</button><button class="ghost" id="cancel">cancel</button></div><div class="err" id="err"></div></div>`;
+}
+async function api(path, payload) {
+  const r = await fetch(path, { method:'POST', headers:{'content-type':'application/json','x-iac-nonce':NONCE}, body: JSON.stringify(payload) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.rejected ? `REJECTED (${j.code}): ${j.message}\n${j.hint||''}` : (j.error || 'failed'));
+  return j;
+}
+function wire(t) {
+  const csv = (s) => s.split(',').map(x=>x.trim()).filter(Boolean);
+  $('#send')?.addEventListener('click', async () => {
+    const err = $('#err'); err.textContent = '';
+    try {
+      if (composeOpen === 'new') { await api('/api/open', { title: $('#title').value, kind: $('#kind').value, body: $('#body').value, waitingOn: csv($('#wo').value), project: $('#project').value.trim() || 'global' }); composeOpen = false; sel = null; }
+      else await api('/api/post', { thread: t.id, kind: $('#kind').value, body: $('#body').value, re: $('#re').value.trim(), waitingOn: csv($('#wo').value) });
+      await load();
+    } catch (e) { err.textContent = e.message; }
+  });
+  $('#cancel')?.addEventListener('click', () => { composeOpen = false; render(); });
+  document.querySelectorAll('[data-act]').forEach(b => b.onclick = async () => {
+    const action = b.dataset.act;
+    if (action === 'set-project') { const project = prompt('project id (owner/repo, local:<name>, or global)', proj !== 'all' ? proj : ''); if (!project) return; try { await api('/api/action', { action, thread: t.id, project: project.trim() }); await load(); } catch (e) { alert(e.message); } return; }
+    const reason = action === 'close' ? null : prompt(`reason to ${action}?`) ?? undefined;
+    const body = action === 'close' ? prompt('resolution (what was decided)?') : undefined;
+    if (action === 'close' && body === null) return;
+    try { await api('/api/action', { action, thread: t.id, reason, body }); await load(); } catch (e) { alert(e.message); }
+  });
+}
+$('#newBtn').onclick = () => { composeOpen = 'new'; render(); };
+$('#showidle').onchange = () => render();
+$('#proj').onchange = (e) => { proj = e.target.value; try { localStorage.setItem('iac.project', proj); } catch {} render(); };
+$('#gcBtn').onclick = async () => { const r = await api('/api/action', { action:'gc' }); alert(r.removed.length ? 'removed ' + r.removed.join(', ') : 'nothing expired'); load(); };
+load(); setInterval(() => { if (!document.activeElement || !['TEXTAREA','INPUT'].includes(document.activeElement.tagName)) load(); }, 4000);
+</script>
+</body>
+</html>

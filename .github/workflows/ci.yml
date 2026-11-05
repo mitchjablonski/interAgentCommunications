@@ -1,0 +1,169 @@
+# One job per OS family (Linux: Node 20 and 24, the lock stress test and archive
+# checks; Windows: native paths and argument quoting), plus the private scan.
+# Both OS jobs also run the private tooling suite at Node 24 in private repositories.
+# timeout-minutes caps a hung job; a normal run takes about a minute.
+name: ci
+on:
+  # No paths filter: Markdown and every other public file are scanned too.
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Replace obsolete runs only within one PR; each main/manual run is independent.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: '20'
+      # A public copy of this repository must not carry private/. Runs
+      # everywhere; an unknown visibility counts as public.
+      - name: private/ only in a private repository
+        env:
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPO_PRIVATE" != "true" ] && [ -e private ]; then
+            echo "refusing: private/ is present but the repository is not private" >&2
+            exit 1
+          fi
+      - run: npm test
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: '24'
+      - run: npm test
+      - name: Private tooling at Node 24
+        if: github.event.repository.private
+        run: bash private/ci.sh test
+        shell: bash
+      - name: Concurrent writers keep the hash chain valid
+        run: bash test/lock-stress.sh 8 5
+      - name: Export-ignored and local files are absent from the archive
+        run: |
+          set -euo pipefail
+          git archive --format=tar --output=/tmp/iac-public.tar HEAD
+          tar -tf /tmp/iac-public.tar
+          # Nothing under private/ may reach the archive. This fixed check
+          # catches a dropped .gitattributes line, which the attribute query
+          # below (it reads what git archive reads) cannot.
+          if tar -tf /tmp/iac-public.tar | grep -E '^private(/|$)'; then
+            echo "refusing archive: private/ is present" >&2
+            exit 1
+          fi
+          ignored="$(git ls-files | git check-attr --stdin export-ignore | awk -F': ' '$3 == "set" {print $1}')"
+          echo "--- export-ignored: ${ignored:-none}"
+          for f in $ignored; do
+            if tar -tf /tmp/iac-public.tar | grep -qxF "$f"; then
+              echo "refusing archive: export-ignored file $f is present" >&2
+              exit 1
+            fi
+          done
+          if tar -tf /tmp/iac-public.tar | grep -Ei '\.pem$|(^|/)\.(agora|inter-agent-comms)/|(^|/)\.claude/|settings\.local'; then
+            echo "refusing archive: key, store or local harness files found" >&2
+            exit 1
+          fi
+      # Installs the published tarball, not the checkout, so a missing `files`
+      # entry or a stray local file is caught before release.
+      - name: Pack, install elsewhere, exercise the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack --silent)"
+          tarball="$PWD/$tarball"
+          echo "--- tarball contents"
+          tar -tzf "$tarball"
+          if tar -tzf "$tarball" | grep -Ei 'settings\.local|\.claude/|\.pem$|\.(agora|inter-agent-comms)/'; then
+            echo "refusing to publish: local or secret material in tarball" >&2
+            exit 1
+          fi
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y >/dev/null
+          npm install --no-save "$tarball" >/dev/null
+          export IAC_HOME="$work/store"
+          bin="$work/node_modules/.bin/iac"
+          "$bin" init --human tester --agents alpha,beta
+          "$bin" whoami --as alpha
+          thread="$("$bin" open --as alpha --project o/r --title "packed install" --kind status --waiting-on beta --body "does the packaged CLI work" --json | node -pe "JSON.parse(require('fs').readFileSync(0)).thread")"
+          "$bin" post "$thread" --as beta --body "yes"
+          "$bin" brief --as beta --project o/r
+          out="$("$bin" verify)"; echo "$out"; grep -q "✓" <<<"$out"
+          # the long name and the deprecated agora alias are the same CLI
+          "$work/node_modules/.bin/inter-agent-comms" whoami --as alpha
+          out="$("$work/node_modules/.bin/agora" verify 2>&1)"; echo "$out"; grep -q "✓" <<<"$out"
+          echo "packed install OK"
+
+  # Privacy findings and stale allow entries fail the workflow.
+  # Optional IAC_PRIVATE_TERMS (repository secret, comma-separated) adds
+  # owner-specific private identifiers. Without it the full built-in privacy
+  # scan still runs; the coverage note distinguishes that optional extra check.
+  private-scan:
+    if: github.event.repository.private
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      IAC_PRIVATE_TERMS: ${{ secrets.IAC_PRIVATE_TERMS }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: '24'
+      - run: bash private/ci.sh scan
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: '24'
+      - run: npm test
+      - name: Private tooling at Node 24
+        if: github.event.repository.private
+        run: bash private/ci.sh test
+        shell: bash
+      # Installs the published tarball, not the checkout, so a missing `files`
+      # entry or a stray local file is caught before release.
+      - name: Pack, install elsewhere, exercise the CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack --silent)"
+          tarball="$PWD/$tarball"
+          echo "--- tarball contents"
+          tar -tzf "$tarball"
+          if tar -tzf "$tarball" | grep -Ei 'settings\.local|\.claude/|\.pem$|\.(agora|inter-agent-comms)/'; then
+            echo "refusing to publish: local or secret material in tarball" >&2
+            exit 1
+          fi
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y >/dev/null
+          npm install --no-save "$tarball" >/dev/null
+          export IAC_HOME="$work/store"
+          bin="$work/node_modules/.bin/iac"
+          "$bin" init --human tester --agents alpha,beta
+          "$bin" whoami --as alpha
+          thread="$("$bin" open --as alpha --project o/r --title "packed install" --kind status --waiting-on beta --body "does the packaged CLI work" --json | node -pe "JSON.parse(require('fs').readFileSync(0)).thread")"
+          "$bin" post "$thread" --as beta --body "yes"
+          "$bin" brief --as beta --project o/r
+          out="$("$bin" verify)"; echo "$out"; grep -q "✓" <<<"$out"
+          # the long name and the deprecated agora alias are the same CLI
+          "$work/node_modules/.bin/inter-agent-comms" whoami --as alpha
+          out="$("$work/node_modules/.bin/agora" verify 2>&1)"; echo "$out"; grep -q "✓" <<<"$out"
+          echo "packed install OK"

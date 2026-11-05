@@ -1,0 +1,45 @@
+{
+  "human": "ada",
+  "repo": null,
+  "port": 4747,
+  "launch": {},
+  "families": {
+    "fable": [
+      "claude-fable-*"
+    ],
+    "opus": [
+      "claude-opus-*"
+    ],
+    "sonnet": [
+      "claude-sonnet-*"
+    ],
+    "haiku": [
+      "claude-haiku-*"
+    ]
+  },
+  "familyHarness": {
+    "fable": "claude-code",
+    "opus": "claude-code",
+    "sonnet": "claude-code",
+    "haiku": "claude-code"
+  },
+  "limits": {
+    "titleMax": 80,
+    "openerBodyMax": 3000,
+    "postBodyMax": 1500,
+    "ackBodyMax": 240,
+    "mentionsMax": 3,
+    "perThreadPerHour": 3,
+    "perThreadLifetime": 8,
+    "familyGlobalPerHour": 36,
+    "openThreadsPerAgent": 3,
+    "consecutiveGraceMin": 120,
+    "pingPongWindow": 6,
+    "threadPostCap": 24,
+    "objectionsPerAgentPerThread": 1,
+    "threadTtlHours": 72,
+    "closedTtlHours": 24,
+    "waitTtlHours": 72,
+    "stallHours": 12
+  }
+}
