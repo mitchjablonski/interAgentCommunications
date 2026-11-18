@@ -74,3 +74,55 @@ export function writeHookReceipt(status, env = process.env, reason) {
     if (owned && staged && sameFile(temporary, staged)) { try { fs.unlinkSync(temporary); } catch {} }
   }
 }
+
+// ---- Claude `brief --hook` receipts -------------------------------------------------
+// Default OFF: written only when IAC_HOOK_RECEIPT_DIR names an absolute, symlink-free
+// directory. One small file per invocation, so SessionStart and each prompt are separate;
+// fixed categories, a monotonic elapsed time and the emitted byte count only. Never a
+// session/agent id, path, model, payload, board text or raw error.
+
+export const CLAUDE_RECEIPT_DIR = 'iac-claude-hook-receipts';
+export const CLAUDE_RECEIPT_MAX = 64;
+export const CLAUDE_STATUSES = new Set(['gated', 'no-agent', 'brief-empty', 'brief-emitted', 'identity-diagnostic', 'failure']);
+const CLAUDE_EVENTS = new Set(['SessionStart', 'UserPromptSubmit']);
+const slotName = (i) => `slot-${String(i).padStart(2, '0')}.json`;
+
+/**
+ * Returns 'disabled' (opt-in unset), 'written', or 'skipped'. Never throws, never prints.
+ * Retention is CLAUDE_RECEIPT_MAX fixed slots, each claimed by exclusive create: concurrent
+ * invocations cannot exceed the bound, and an existing entry is never followed or replaced.
+ */
+export function writeClaudeHookReceipt({ hookEvent, status, payload, ownTranscript, elapsedMs, bytes } = {}, env = process.env) {
+  let fd; let file; let staged; let owned = false;
+  try {
+    if (!env.IAC_HOOK_RECEIPT_DIR) return 'disabled';
+    if (!CLAUDE_STATUSES.has(status)) return 'skipped';
+    const base = safeDirectory(env.IAC_HOOK_RECEIPT_DIR); if (!base) return 'skipped';
+    const child = path.join(base, CLAUDE_RECEIPT_DIR);
+    try { fs.mkdirSync(child, { mode: 0o700 }); } catch (e) { if (e.code !== 'EEXIST') return 'skipped'; }
+    const directory = safeDirectory(child); if (!directory) return 'skipped';
+    const receipt = {
+      schema: 1, event: 'claude-brief-hook',
+      hookEvent: CLAUDE_EVENTS.has(hookEvent) ? hookEvent : 'other',
+      status, payload: payload === true, ownTranscript: ownTranscript === true,
+      elapsedMs: Number.isFinite(elapsedMs) && elapsedMs >= 0 ? Math.round(elapsedMs) : 0,
+      bytes: Number.isInteger(bytes) && bytes >= 0 ? bytes : 0,
+      timestamp: new Date().toISOString(),
+    };
+    for (let i = 0; i < CLAUDE_RECEIPT_MAX && fd === undefined; i++) {
+      const candidate = path.join(directory, slotName(i));
+      try { fd = fs.openSync(candidate, 'wx', 0o600); file = candidate; } catch (e) { if (e.code !== 'EEXIST') return 'skipped'; }
+    }
+    if (fd === undefined) return 'skipped';   // every slot taken: the bound holds
+    owned = true; staged = fs.fstatSync(fd);
+    if (!staged.isFile() || staged.nlink !== 1) return 'skipped';
+    fs.writeFileSync(fd, `${JSON.stringify(receipt)}\n`);
+    fs.closeSync(fd); fd = undefined; owned = false;
+    return 'written';
+  } catch { return 'skipped'; } // Diagnostics must never change hook output or exit status.
+  finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch {} }
+    // Remove a failed entry only while it is still the one this call created.
+    if (owned && file && staged && sameFile(file, staged)) { try { fs.unlinkSync(file); } catch {} }
+  }
+}

@@ -25,7 +25,20 @@ export function harnessTaskId(env = process.env) {
   const claude = env.CLAUDE_CODE_SESSION_ID || env.CLAUDE_SESSION_ID;
   const codex = codexTaskId(env); // CODEX_THREAD_ID only: a root-only CODEX_SESSION_ID names no task
   if (claude && codexPresent(env)) return null;
-  return claude || codex || null;
+  if (claude) { const sub = claudeAgentId(env); return sub ? `${claude}/${sub}` : claude; }
+  return codex || null;
+}
+
+/**
+ * IAC_CLAUDE_AGENT_ID: the plugin's PreToolUse hook (`iac claude-pretool`) exports the hook's
+ * `agent_id` for an iac command run by a Claude Code subagent, whose shell otherwise has its
+ * lead's session id. Unset or empty: not a subagent. A value that is not a valid id: null.
+ */
+export const CLAUDE_AGENT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+function claudeAgentId(env) {
+  const v = env.IAC_CLAUDE_AGENT_ID;
+  if (v === undefined || v === '') return undefined;
+  return CLAUDE_AGENT_ID_RE.test(v) ? v : null;
 }
 
 /** Tests redirect HOME; follow the env like store.js follows IAC_HOME, not os.homedir() blindly. */
@@ -61,6 +74,8 @@ export function claudeTranscriptPath(sessionId, env = process.env) {
  * runs), and either counts. A `/model` switch newer than any model evidence yields null
  * (see isModelSwitch); sessionModelState tells that case apart from a record with no model
  * evidence at all. Sub-agent entries (isSidechain) are not the session's own model.
+ * `agentId` reads a subagent's own record instead: there every entry is isSidechain, and
+ * only entries naming that agentId count.
  */
 export function lastSessionModel(file, opts) { return sessionModelState(file, opts).model; }
 
@@ -76,7 +91,7 @@ export const TRANSCRIPT_SCAN_CAP = 64 * 1024 * 1024;
  * whole-file read with no evidence is a fresh record. Past `cap` with still no evidence,
  * `unknown` is true: as with a switch, the model cannot be established.
  */
-export function sessionModelState(file, { tail = 256 * 1024, cap = TRANSCRIPT_SCAN_CAP } = {}) {
+export function sessionModelState(file, { tail = 256 * 1024, cap = TRANSCRIPT_SCAN_CAP, agentId } = {}) {
   const none = { model: null, switching: false, unknown: false };
   let size;
   try { size = fs.statSync(file).size; } catch { return none; }
@@ -92,20 +107,20 @@ export function sessionModelState(file, { tail = 256 * 1024, cap = TRANSCRIPT_SC
       } finally { fs.closeSync(fd); }
     } catch { return { ...none, unknown: true }; }
     if (start > 0) text = text.slice(text.indexOf('\n') + 1);  // drop the truncated first line
-    const found = scanModelEvidence(text);
+    const found = scanModelEvidence(text, agentId);
     if (found) return { ...none, ...found };
     if (start === 0) return none;               // the whole record, and it names no model
     if (want >= cap) return { ...none, unknown: true };
   }
 }
 
-function scanModelEvidence(text) {
+function scanModelEvidence(text, agentId) {
   const lines = text.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i].trim();
     if (!l) continue;
     let e; try { e = JSON.parse(l); } catch { continue; }
-    if (!e || typeof e !== 'object' || e.isSidechain) continue;
+    if (!e || typeof e !== 'object' || (agentId ? e.agentId !== agentId : e.isSidechain)) continue;
     const m = e.type === 'assistant' ? e.message?.model
       : e.type === 'attachment' && e.attachment?.type === 'model' ? e.attachment.identity?.modelId
         : null;
@@ -146,6 +161,20 @@ function hookTranscript(env, session) { return claudeHookTranscript(env[HOOK_TRA
 /** `p` if it is session `session`'s own transcript under the Claude config dir's projects/, else null. */
 export function claudeHookTranscript(p, session, env = process.env) {
   if (typeof p !== 'string' || path.basename(p) !== `${session}.jsonl`) return null;
+  return claudeProjectsFile(p, env);
+}
+
+/**
+ * A subagent's own record: `<lead transcript minus .jsonl>/subagents/agent-<id>.jsonl`, contained
+ * under projects/ like a hook's transcript path. Claude Code writes it, not the hook.
+ */
+export function claudeSubagentTranscript(lead, agentId, env = process.env) {
+  if (typeof lead !== 'string' || !lead.endsWith('.jsonl') || !CLAUDE_AGENT_ID_RE.test(agentId || '')) return null;
+  return claudeProjectsFile(path.join(lead.slice(0, -'.jsonl'.length), 'subagents', `agent-${agentId}.jsonl`), env);
+}
+
+/** `p`, resolved, if it is a regular file inside the Claude config dir's projects/, else null. */
+function claudeProjectsFile(p, env) {
   try {
     const root = fs.realpathSync(path.join(claudeDir(env), 'projects'));
     const real = fs.realpathSync(p);
@@ -173,10 +202,28 @@ export function harnessIdentity(env = process.env, store) {
   }
   if (session) {
     const transcript = claudeTranscriptPath(session, env) || hookTranscript(env, session);
+    const agentId = claudeAgentId(env);
+    if (agentId !== undefined) return claudeSubagentIdentity(session, transcript, agentId, env);
     const st = transcript ? sessionModelState(transcript) : { model: null, switching: false, unknown: false };
     return { harness: 'claude-code', session, transcript, model: st.model, switching: st.switching, modelUnknown: st.unknown, ...(st.via ? { modelVia: st.via } : {}) };
   }
   return codexRolloutIdentity(env);
+}
+
+/**
+ * A Claude Code subagent (IAC_CLAUDE_AGENT_ID set): its own record names its model, and its task
+ * id is the lead's session plus its agent id. Anything short of that names no model, so the
+ * subagent is read-only; it never falls back to the lead's record.
+ */
+function claudeSubagentIdentity(session, lead, agentId, env) {
+  const fail = (why) => ({ harness: 'claude-code', session, transcript: null, model: null, subagent: true, agentId, subagentProblem: why });
+  if (agentId === null) return fail('IAC_CLAUDE_AGENT_ID is not a valid Claude Code subagent id');
+  if (!lead) return fail(`no session record found for claude-code session ${session}, so subagent ${agentId}'s record cannot be located`);
+  const transcript = claudeSubagentTranscript(lead, agentId, env);
+  if (!transcript) return fail(`no record for subagent ${agentId} under claude-code session ${session}`);
+  const st = sessionModelState(transcript, { agentId });
+  if (!st.model) return fail(`the record for subagent ${agentId} names no model${st.unknown ? ' within the scan cap, or could not be read' : ''}`);
+  return { harness: 'claude-code', session: `${session}/${agentId}`, transcript, model: st.model, subagent: true, agentId, ...(st.via ? { modelVia: st.via } : {}) };
 }
 
 function globToRe(g) {
@@ -369,10 +416,11 @@ export function resolveIdentity({ explicit, env = process.env, config = {}, regi
   const base = { harness: h?.harness || null, session: h?.session || null, model, family,
     familyHarness: family ? declaredHarness(family, config) : null,
     ...(switching ? { switching: true } : {}), ...(modelUnknown ? { modelUnknown: true } : {}),
+    ...(h?.subagent ? { subagent: true, agentId: h.agentId } : {}),
     // root-only Codex refuses every write, even under a launcher binding: say so on every resolution
     ...(h?.rootOnly ? { rootOnly: true, readOnly: CODEX_ROOT_ONLY_REASON, readOnlyTodo: CODEX_ROOT_ONLY_TODO } : {}) };
   const reason = !h ? 'no IAC_AGENT, and no harness session id in this environment'
-    : h.conflict || h.unattestable || (!(h.transcript || h.rollout) ? `no session record found for ${h.harness} session ${h.session}`
+    : h.conflict || h.unattestable || h.subagentProblem || (!(h.transcript || h.rollout) ? `no session record found for ${h.harness} session ${h.session}`
       : switching ? `session ${h.session} is switching models (/model); the new model is not announced yet`
       : modelUnknown ? `session record for ${h.session} names no model in its last ${TRANSCRIPT_SCAN_CAP / 1024 / 1024}MB, or could not be read`
       : !model && h.modelProblem === 'invalid-record' ? `the newest complete record in the session record for ${h.session} is unparseable or names an invalid model, so the current model cannot be established (fail closed)`
@@ -385,6 +433,7 @@ export function resolveIdentity({ explicit, env = process.env, config = {}, regi
           : `model '${model}' maps to family '${family}', which is not a registered agent`);
   const todo = h?.conflict ? 'start the inner harness outside the parent harness, or bind it explicitly with iac-launch.'
     : h?.rootOnly ? CODEX_ROOT_ONLY_TODO
+    : h?.subagentProblem ? 'a Claude Code subagent writes only under the model its own record names; until iac can read it, stay read-only and hand the post to your lead.'
     : h?.unattestable ? 'set CODEX_HOME to an absolute path (or unset it for ~/.codex) and restart Codex.'
     : !h ? 'pass --as <name>, or start through iac-launch <name>.'
     : switching ? 'the harness is switching models; retry after the next prompt.'
@@ -397,6 +446,11 @@ export function resolveIdentity({ explicit, env = process.env, config = {}, regi
       : family ? `iac add-agent ${family}`
         : 'bind this session explicitly with iac-launch <name>.';
 
+  // A subagent is its own model's family or nobody: never its lead's binding, never --as.
+  if (h?.subagent && !attested) {
+    if (want) throw new Rejected('identity-override', reason, `${todo} A Claude Code subagent may not choose an identity with --as.`);
+    return { ...base, agent: null, source: null, reason, todo };
+  }
   if (bound) {
     if (want && want !== bound) {
       throw new Rejected('identity-override',
@@ -437,9 +491,17 @@ export function resolveIdentity({ explicit, env = process.env, config = {}, regi
   return { ...base, agent: null, source: null, reason, todo };
 }
 
+// A label derived from a task id that would pass the 80-character cap keeps the agent name and a stable
+// digest of the whole task id, so distinct tasks stay distinct rather than being truncated together.
+export function derivedInstance(agent, harnessId) {
+  const full = `${agent}-${harnessId}`;
+  if (full.length <= 80) return full;
+  return `${agent}-h${crypto.createHash('sha256').update(String(harnessId)).digest('hex').slice(0, 80 - agent.length - 2)}`;
+}
+
 export function resolveInstance({ explicit, agent, project, env = process.env, session }) {
   const harnessId = session || harnessTaskId(env);
-  const v = explicit || (harnessId ? `${agent}-${harnessId}` : null) || envVar(env, 'INSTANCE') || `${agent}@${project}`;
+  const v = explicit || (harnessId ? derivedInstance(agent, harnessId) : null) || envVar(env, 'INSTANCE') || `${agent}@${project}`;
   if (!INSTANCE_RE.test(v)) throw new Rejected('bad-instance', `instance label '${v}' is invalid`);
   return v;
 }
@@ -873,6 +935,7 @@ export class Agora {
     s.posts = s.posts.map((p) => ({ ...p, verified: !bad.has(p.id) }));
     s.waitClears = (s.waitClears || []).map((c) => ({ ...c, verified: !bad.has(c.id) }));
     s.verified = v.ok;
+    s.waits = this._waitHistory(s, bad);
     return s;
   }
 
@@ -897,6 +960,7 @@ export class Agora {
     if (id.rootOnly) {
       throw new Rejected('unattested-identity', CODEX_ROOT_ONLY_REASON, `${CODEX_ROOT_ONLY_TODO} Until then this session is read-only.`);
     }
+    if (id.subagent && !id.agent) throw new Rejected('unattested-identity', id.reason, id.todo);
     if (id.agent && id.agent !== author) {
       throw new Rejected('identity-override',
         id.source === 'launcher'
@@ -1305,6 +1369,40 @@ export class Agora {
   }
 
   /**
+   * Every wait raised in one thread, with its current state, for the viewer's per-thread timeline.
+   * Derived by the same rules as _outstandingWaits and _waitBoard (shared waitResolution, the same
+   * expiry and stall horizons): 'answered' and 'cleared' are exactly the waits those leave out;
+   * 'open', 'claimed' and 'expired' are the ones they keep. A clear counts only when it verifies
+   * (`bad` holds the ids of events that failed verification), as on the board; an unverified one
+   * is reported alongside, without changing the state. Read-only; nothing here is signed.
+   */
+  _waitHistory(s, bad = new Set()) {
+    const ttlMs = this._waitTtlMs();
+    const stallMs = this._stallMs();
+    const reg = this.registry();
+    const now = this.now();
+    const out = [];
+    for (const p of s.posts) {
+      for (const target of p.waitingOn || []) {
+        const clears = (s.waitClears || []).filter((c) => c.post === p.id && c.on === target);
+        const clear = clears.find((c) => !bad.has(c.id)) || null;
+        const unverifiedClear = clears.find((c) => bad.has(c.id)) || null;
+        const { later, claimedBy, answer } = waitResolution(s, p, target);
+        const age = now - Date.parse(p.ts);
+        const expired = !clear && !answer && ttlMs > 0 && !later.length && age > ttlMs;
+        const state = clear ? 'cleared' : answer ? 'answered' : expired ? 'expired' : later.length ? 'claimed' : 'open';
+        const stalled = state === 'open' && stallMs > 0 && age > stallMs && reg[target]?.role !== 'human';
+        out.push({ post: p.id, from: p.author, on: target, since: p.ts, state, stalled,
+          claimedBy, claimPost: later[0]?.id || null, claimedAt: later[0]?.ts || null,
+          answerPost: answer?.id || null, answeredAt: answer?.ts || null,
+          clear: clear && { id: clear.id, by: clear.author, ts: clear.ts, reason: clear.reason },
+          unverifiedClear: unverifiedClear && { id: unverifiedClear.id, by: unverifiedClear.author, ts: unverifiedClear.ts } });
+      }
+    }
+    return out;
+  }
+
+  /**
    * The waits raised in one derived thread that are still outstanding: not withdrawn by a
    * verifiable clear, and not answered by a non-ack post from the target that claimed them.
    * No expiry and no closed-thread filtering — that is the board's business, not the thread's.
@@ -1325,10 +1423,8 @@ export class Agora {
           verified ??= new Set(this.verify(s.id).problems.map((q) => q.id));
           if (s.waitClears.some((c) => silences(c, p.id, target) && !verified.has(c.id))) continue;
         }
-        const later = s.posts.filter((q) => q.author === target && Date.parse(q.ts) > Date.parse(p.ts));
-        const claimedBy = later.length ? eventInstance(later[0], s.project) : null;
-        const answered = claimedBy && later.some((q) => q.kind !== 'ack' && eventInstance(q, s.project) === claimedBy);
-        if (!answered) out.push({ from: p.author, fromInstance: p.instance || null, fromProject: p.projectAtPost || s.project, on: target, thread: s.id, title: s.title, status: s.status, project: s.project, openerInstance: s.openerInstance || null, post: p.id, since: p.ts, body: p.body, acked: later.length > 0, claimedBy, ...(s.damagedLines?.length ? { damagedLines: s.damagedLines } : {}) });
+        const { later, claimedBy, answer } = waitResolution(s, p, target);
+        if (!answer) out.push({ from: p.author, fromInstance: p.instance || null, fromProject: p.projectAtPost || s.project, on: target, thread: s.id, title: s.title, status: s.status, project: s.project, openerInstance: s.openerInstance || null, post: p.id, since: p.ts, body: p.body, acked: later.length > 0, claimedBy, ...(s.damagedLines?.length ? { damagedLines: s.damagedLines } : {}) });
       }
     }
     return out;
@@ -1464,6 +1560,18 @@ export class Agora {
     }
     return out;
   }
+}
+
+/**
+ * How a wait (post `p` waiting on family `target`) has been taken up in thread `s`: the target's
+ * later posts; the instance of the first of them, which claims it; and the first later non-ack
+ * post by that same instance, which answers it. Shared by the wait board and the thread timeline.
+ */
+function waitResolution(s, p, target) {
+  const later = s.posts.filter((q) => q.author === target && Date.parse(q.ts) > Date.parse(p.ts));
+  const claimedBy = later.length ? eventInstance(later[0], s.project) : null;
+  const answer = claimedBy ? later.find((q) => q.kind !== 'ack' && eventInstance(q, s.project) === claimedBy) || null : null;
+  return { later, claimedBy, answer };
 }
 
 function eventInstance(event, project) {

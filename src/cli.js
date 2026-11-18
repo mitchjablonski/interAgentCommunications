@@ -8,7 +8,8 @@ import { Agora, familyOverlaps, KINDS, Rejected, renderMarkdown, resolveInstance
 import { brief, compact, elsewhereParts, isDamaged, stalledNote } from './format.js';
 import { detectProject } from './project.js';
 import { readCodexHookPayload, codexHookSessionDetail, withoutCodexIds } from './codex-hook.js';
-import { writeHookReceipt } from './hook-receipt.js';
+import { writeHookReceipt, writeClaudeHookReceipt } from './hook-receipt.js';
+import { claudePreToolOutput } from './claude-pretool.js';
 import { envConflicts, envSource } from './env.js';
 
 const execFileP = promisify(execFile);
@@ -79,7 +80,7 @@ write  (all accept --body TEXT | --body-file F | stdin, --mention a,b, --waiting
 human / ops
   repair <thread>                human only: quarantine unparseable lines after retained history verifies
   serve [--port N]               local web viewer (127.0.0.1)
-  mcp                            run the MCP stdio server (identity resolved per call; see README)
+  mcp                            run the MCP stdio server (identity resolved per call; see docs/reference.md)
   issues [--agent NAME] [--repo R]   list GitHub issues labelled agent:NAME
   gc [--max-ms N]                delete expired threads (in batches; --max-ms caps the total time)
 
@@ -294,8 +295,13 @@ const HOOK_LOUD = new Set(['stale-binding', 'identity-override']);
  * real wall time.
  */
 export async function hookBrief(o, { now, spawn, stdin, schedule } = {}) {
+  // An opt-in, content-free receipt of which terminal path this invocation took.
+  const started = performance.now();
+  const receipt = { hookEvent: undefined, status: 'failure', payload: false, ownTranscript: false, bytes: 0 };
   try {
     const payload = await readHookPayload(stdin, { schedule });
+    receipt.payload = !!payload && typeof payload === 'object';
+    receipt.hookEvent = receipt.payload ? payload.hook_event_name : undefined;
     const env = { ...process.env };
     const sid = typeof payload?.session_id === 'string' ? payload.session_id : null;
     // Inside Codex the env never has a Claude id, so without this check a Codex hook payload
@@ -305,13 +311,14 @@ export async function hookBrief(o, { now, spawn, stdin, schedule } = {}) {
     // silent) rather than briefing the parent Codex agent into the Claude session.
     const tp = typeof payload?.transcript_path === 'string' ? payload.transcript_path : null;
     const claudePayload = !!(sid && claudeHookTranscript(tp, sid, env));
+    receipt.ownTranscript = claudePayload;
     const codexEnv = !!(env.CODEX_THREAD_ID || env.CODEX_SESSION_ID);
     // With Codex ids inherited but no verifiable Claude payload (a fresh SessionStart whose
     // transcript is not on disk yet, or no readable stdin), falling through would brief the
     // parent Codex agent into what may be a Claude session. `brief --hook` is the Claude hook
     // (Codex runs `iac codex-hook`), so fall through to Codex identity only for a payload
     // that is plainly Codex's own; anything else stays silent.
-    if (codexEnv && !claudePayload && !codexShapedPayload(sid, tp, env)) return 0;
+    if (codexEnv && !claudePayload && !codexShapedPayload(sid, tp, env)) { receipt.status = 'gated'; return 0; }
     const codex = !claudePayload && (codexEnv || (tp && /[\\/]\.codex[\\/]/.test(tp)));
     if (!codex && !env.CLAUDE_CODE_SESSION_ID && !env.CLAUDE_SESSION_ID && sid && /^[A-Za-z0-9._-]{1,128}$/.test(sid)) {
       env.CLAUDE_CODE_SESSION_ID = sid;
@@ -321,15 +328,19 @@ export async function hookBrief(o, { now, spawn, stdin, schedule } = {}) {
     if (typeof payload?.cwd === 'string') { try { if (fs.statSync(payload.cwd).isDirectory()) cwd = payload.cwd; } catch {} }
     const agora = new Agora(o.home, { env });
     const me = agora.identity({ explicit: o.as }).agent;
-    if (!me) return 0;
+    if (!me) { receipt.status = 'no-agent'; return 0; }
     const proj = o['all-projects'] ? undefined : detectProject({ explicit: o.project, cwd, env, now, spawn });
     const line = brief(agora, me, { project: proj, instance: resolveInstance({ explicit: o.instance, agent: me, project: proj || detectProject({ cwd, env, now, spawn }), env }) });
-    if (line) console.log(line);
+    if (line) { console.log(line); receipt.bytes = Buffer.byteLength(`${line}\n`); }
+    receipt.status = line ? 'brief-emitted' : 'brief-empty';
   } catch (e) {
     if (e instanceof Rejected && HOOK_LOUD.has(e.code)) {
-      try { console.log(`iac: identity conflict (${e.code}) — run iac whoami`); } catch {}
+      const note = `iac: identity conflict (${e.code}) — run iac whoami`;
+      try { console.log(note); receipt.status = 'identity-diagnostic'; receipt.bytes = Buffer.byteLength(`${note}\n`); } catch {}
     }
     /* anything else: silent by contract */
+  } finally {
+    writeClaudeHookReceipt({ ...receipt, elapsedMs: performance.now() - started }, process.env);
   }
   return 0;
 }
@@ -469,8 +480,18 @@ async function ghIssueCreate({ repo, title, body, labels }) {
   }
 }
 
+/** `claude-pretool` (hidden): the Claude Code PreToolUse hook on Bash. Prints a rewrite or nothing, always exits 0. */
+export async function claudePreTool({ stdin, schedule } = {}) {
+  try {
+    const out = claudePreToolOutput(await readHookPayload(stdin, { schedule }));
+    if (out) console.log(JSON.stringify(out));
+  } catch { /* never block a tool call */ }
+  return 0;
+}
+
 export async function main(argv) {
   if (argv[0] === 'codex-hook') return codexHook(argv.slice(1));
+  if (argv[0] === 'claude-pretool') return claudePreTool();
   // A hook must never fail the prompt, not even on a flag it does not know.
   // Any spelling of --hook (--hook=1 included) is hook mode; a flag it cannot parse means no brief, exit 0.
   let loose; try { loose = parseArgs({ args: argv, options: OPTS, allowPositionals: true, strict: false }); } catch {}
@@ -545,7 +566,7 @@ export async function main(argv) {
           model: id.model, session: id.session, instance, home: agora.store.home, homeSource: agora.store.homeSource,
           envConflicts: conflicts.length ? conflicts : undefined, reason: id.reason || null,
           familyHarness: id.source === 'harness' ? (id.familyHarness || null) : undefined, switching: id.switching || undefined,
-          rootOnly: id.rootOnly || undefined, readOnly: id.readOnly || undefined };
+          rootOnly: id.rootOnly || undefined, readOnly: id.readOnly || undefined, subagent: id.subagent ? (id.agentId || null) : undefined };
         if (o.json) { console.log(JSON.stringify(json, null, 2)); return 0; }
         const notes = conflicts.map((c) => `note: IAC_${c.name}=${c.iac} and AGORA_${c.name}=${c.agora} differ; IAC_${c.name} wins. Unset AGORA_${c.name}.`);
         const storeLine = `store ${agora.store.home} (${agora.store.homeSource})`;
@@ -556,7 +577,7 @@ export async function main(argv) {
           console.log(`fix: ${id.todo}`);
           return 0;
         }
-        const from = { launcher: `${envSource(process.env, 'AGENT') || 'IAC_AGENT'} (launcher)`, harness: `harness (${id.harness})`, self: '--as (self-declared)' }[id.source];
+        const from = { launcher: `${envSource(process.env, 'AGENT') || 'IAC_AGENT'} (launcher)`, harness: `harness (${id.harness}${id.subagent ? ` subagent ${id.agentId}` : ''})`, self: '--as (self-declared)' }[id.source];
         console.log(`${id.agent} (${reg[id.agent]?.role || 'NOT REGISTERED'}) · identity from ${from} · model ${id.model || 'unknown'} · instance ${instance} · ${storeLine}`);
         for (const n of notes) console.log(n);
         if (id.readOnly) { console.log(`read-only: ${id.readOnly}`); console.log(`fix: ${id.readOnlyTodo}`); }

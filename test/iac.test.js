@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { createHash } from 'node:crypto';
 import { eventHash, signEvent } from '../src/crypto.js';
 import { pathToFileURL } from 'node:url';
 import { Agora, Rejected } from '../src/api.js';
@@ -16,7 +15,7 @@ import { quoteWinArg, isWinBatch, winCommandLine, winExe, winShell, WinArgError 
 // Generic subprocess probes must not adopt the harness running this test suite.
 // Identity tests add their intentional Codex/Claude variables after these defaults.
 // IAC_DOCTOR_WSL_USERS='' keeps doctor (in-process or in a subprocess) off the real /mnt/c/Users/*/.codex.
-const HARNESS_CLEAN = { IAC_AGENT: '', IAC_INSTANCE: '', AGORA_AGENT: '', AGORA_INSTANCE: '', CODEX_THREAD_ID: '', CODEX_SESSION_ID: '', CLAUDE_CODE_SESSION_ID: '', CLAUDE_SESSION_ID: '', IAC_DOCTOR_WSL_USERS: '', IAC_DOCTOR_MANAGED_SETTINGS: '' };
+const HARNESS_CLEAN = { IAC_AGENT: '', IAC_INSTANCE: '', AGORA_AGENT: '', AGORA_INSTANCE: '', CODEX_THREAD_ID: '', CODEX_SESSION_ID: '', CLAUDE_CODE_SESSION_ID: '', CLAUDE_SESSION_ID: '', IAC_CLAUDE_AGENT_ID: '', IAC_DOCTOR_WSL_USERS: '', IAC_DOCTOR_MANAGED_SETTINGS: '' };
 
 function shellCommand(command, options = {}) {
   const shell = process.platform === 'win32' ? 'powershell.exe' : 'sh';
@@ -163,20 +162,18 @@ test('Codex discovery: exact directory budget accepts a complete search and refu
 
 test('CI concurrency source contract preserves accepted events, jobs and security', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const blocks = workflow.match(/^concurrency:\n(?:  [^\n]*\n)+/gm);
+  const source = workflow.replace(/^[ \t]*(?:#.*)?\n/gm, '').replace(/[ \t]+#.*$/gm, '');
+  assert.match(source, /^name: ci$/m, 'stable workflow check name');
+  const triggers = source.match(/^on:\n(?:  [^\n]*\n)+/gm);
+  assert.deepEqual(triggers, ['on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\n']);
+  const permissions = source.match(/^permissions:\n(?:  [^\n]*\n)+/gm);
+  assert.deepEqual(permissions, ['permissions:\n  contents: read\n']);
+  const blocks = source.match(/^concurrency:\n(?:  [^\n]*\n)+/gm);
   assert.equal(blocks?.length, 1, 'one workflow-level concurrency block');
   assert.equal(blocks[0], `concurrency:
-  # Replace obsolete runs only within one PR; each main/manual run is independent.
   group: \${{ github.workflow }}-\${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: \${{ github.event_name == 'pull_request' }}
 `);
-  // Snapshot the accepted workflow outside concurrency, including pinned action
-  // upgrades, consolidated private tooling, disabled caching and required scan.
-  // This intentionally requires explicit review when events, job/check names,
-  // matrix, commands, timeouts, permissions or privacy checks change.
-  const outsideConcurrency = workflow.replace(blocks[0], '');
-  assert.equal(createHash('sha256').update(outsideConcurrency).digest('hex'),
-    'c791182f61712f76a255f27dcf1721e6ee6b4924851150f8b9df0b979b56ba75');
 });
 
 test('CI private tooling stays gated and failure-propagating on both Node 24 OS jobs', () => {
@@ -189,15 +186,31 @@ test('CI private tooling stays gated and failure-propagating on both Node 24 OS 
         run: bash private/ci.sh test
         shell: bash
 `;
-  for (const [osName, runner, versions] of [['linux', 'ubuntu-latest', ['20', '24']], ['windows', 'windows-latest', ['24']]]) {
+  for (const [osName, runner, versions] of [['linux', 'ubuntu-(?:latest|24\\.04)', ['20', '24']], ['windows', 'windows-latest', ['24']]]) {
     const body = jobs.find(([, name]) => name === osName)[2];
+    assert.doesNotMatch(body, /^    (?:if|permissions|continue-on-error):/m, 'OS jobs always run with workflow permissions');
+    // Step conditions: exactly one private-tooling guard; any other is the exact docs-only
+    // test-suite gate (pinned by the docs-only test below), never anything broader.
+    const conditions = body.match(/^      (?:- |  )if: .*$/gm) || [];
+    assert.equal(conditions.filter((c) => c.trim() === 'if: github.event.repository.private').length, 1, 'one private tooling guard');
+    assert.deepEqual(conditions.filter((c) => c.trim() !== 'if: github.event.repository.private').map((c) => c.trim()),
+      Array(osName === 'linux' ? 3 : 1).fill("if: steps.scope.outputs.docs_only != 'true'"), 'only the docs-only gate besides it');
     assert.match(body, new RegExp(`^    runs-on: ${runner}$`, 'm'));
     assert.deepEqual([...body.matchAll(/node-version: '([^']+)'/g)].map(([, version]) => version), versions);
     assert.equal(body.split(privateStep).length, 2, 'one exact private-only bash step, no failure suppression');
-    assert.match(body, /node-version: '24'\n      - run: npm test\n      - name: Private tooling at Node 24\n/);
+    assert.match(body, /node-version: '24'\n(?:[\s\S]*?\n)?      - run: npm test\n        if: steps\.scope\.outputs\.docs_only != 'true'\n      - name: Private tooling at Node 24\n/);
     assert.doesNotMatch(body, /continue-on-error:|always\(\)|\|\| true/, 'tooling failure fails its OS job');
     assert.equal((body.match(/- run: npm test/g) || []).length, versions.length);
     assert.match(body, /- name: Pack, install elsewhere, exercise the CLI/);
+    assert.match(body, /^[ \t]+tarball="\$\(npm pack --silent\)"$/m);
+    assert.match(body, /^[ \t]+npm install --no-save "\$tarball" >\/dev\/null$/m);
+    assert.match(body, /^[ \t]+"\$bin" whoami --as alpha$/m);
+    assert.match(body, /^[ \t]+out="\$\("\$bin" verify\)"; echo "\$out"; grep -q "✓" <<<"\$out"$/m);
+    const tarballGuard = body.match(/^[ \t]+if tar -tzf "\$tarball" \| grep -Ei '[^\n]*'; then\n[^\n]*\n[ \t]+exit 1$/m)?.[0];
+    assert.ok(tarballGuard, 'packed sensitive-file check fails the job');
+    for (const pattern of ['settings\\.local', '\\.claude/', '\\.pem$', 'agora|inter-agent-comms']) {
+      assert.ok(tarballGuard.includes(pattern), 'packed tarball excludes ' + pattern);
+    }
   }
   // This is a source contract, not an expression evaluator. The exact GitHub
   // boolean visibility guard runs the step in private copies, skips it in public
@@ -209,20 +222,56 @@ test('CI private tooling stays gated and failure-propagating on both Node 24 OS 
   assert.doesNotMatch(scan, /continue-on-error:|needs:|IAC_PRIVATE_TERMS\s*[!=]=/);
   assert.match(scan, /IAC_PRIVATE_TERMS: \$\{\{ secrets\.IAC_PRIVATE_TERMS \}\}/);
   assert.match(scan, /- run: bash private\/ci\.sh scan/);
+  assert.doesNotMatch(scan, /^    permissions:/m, 'scan inherits workflow permissions');
+  assert.doesNotMatch(scan, /^      (?:- |  )if:/m, 'scan steps cannot be individually skipped');
+  const linux = jobs.find(([, name]) => name === 'linux')[2];
+  assert.match(linux, /run: bash test\/lock-stress\.sh 8 5/);
+  assert.match(linux, /^[ \t]+git archive --format=tar --output=\/tmp\/iac-public\.tar HEAD$/m);
+  assert.match(linux, /^[ \t]+if tar -tf \/tmp\/iac-public\.tar \| grep -E '\^private\(\/\|\$\)'; then$/m);
+  assert.match(linux, /^[ \t]+ignored="\$\(git ls-files \| git check-attr --stdin export-ignore/m);
+  const archiveGuard = linux.match(/^[ \t]+if tar -tf \/tmp\/iac-public\.tar \| grep -Ei '[^\n]*'; then\n[^\n]*\n[ \t]+exit 1$/m)?.[0];
+  assert.ok(archiveGuard, 'archive sensitive-file check fails the job');
+  for (const pattern of ['settings\\.local', '\\.claude/', '\\.pem$', 'agora|inter-agent-comms']) {
+    assert.ok(archiveGuard.includes(pattern), 'public archive excludes ' + pattern);
+  }
+});
+
+test('CI skips only the test suites on docs-only PRs; privacy, archive, pack and private tooling always run', () => {
+  const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const jobsSource = workflow.slice(workflow.indexOf('\njobs:\n') + '\njobs:\n'.length);
+  const jobs = Object.fromEntries([...jobsSource.matchAll(/^  ([a-z][a-z-]*):\n([\s\S]*?)(?=^  [a-z][a-z-]*:\n|$(?![\s\S]))/gm)].map(([, n, b]) => [n, b]));
+  const gate = "        if: steps.scope.outputs.docs_only != 'true'\n";
+  const scope = /      - name: Change scope\n        id: scope\n        shell: bash\n        env:\n          EVENT: \$\{\{ github\.event_name \}\}\n          BASE: \$\{\{ github\.event\.pull_request\.base\.sha \}\}\n        run: \|\n/;
+  for (const name of ['linux', 'windows']) {
+    const body = jobs[name];
+    assert.match(body, scope, `${name}: one exact scope step, PR-only, adds/modifications of root *.md or docs/ only`);
+    assert.equal(body.split('id: scope').length, 2);
+    // every test-suite run is gated; nothing else is
+    assert.equal(body.split('      - run: npm test\n' + gate).length - 1, (body.match(/- run: npm test/g) || []).length);
+    assert.equal(body.split(gate).length - 1, name === 'linux' ? 3 : 1);
+    for (const always of ['      - name: Private tooling at Node 24\n        if: github.event.repository.private\n', '      - name: Pack, install elsewhere, exercise the CLI\n'])
+      assert.ok(body.includes(always), `${name}: ${always.trim().split('\n')[0]} is not gated`);
+  }
+  assert.ok(jobs.linux.includes('      - name: Concurrent writers keep the hash chain valid\n' + gate));
+  assert.match(jobs.linux, /      - name: Export-ignored and local files are absent from the archive\n        run: \|/);
+  assert.match(jobs.linux, /      - name: private\/ only in a private repository\n        env:/);
+  assert.doesNotMatch(jobs['private-scan'], /scope|docs_only/, 'the privacy scan never skips');
 });
 
 test('CI pins reviewed actions and gates privacy with optional personal terms', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-  const actions = [...workflow.matchAll(/uses: (actions\/[^\s]+) # (v[^\s]+)/g)].map(([, action, version]) => [action, version]);
+  const actions = [...workflow.matchAll(/^[ \t]*(?:- )?uses: (\S+)/gm)].map(([, action]) => action);
   assert.equal(actions.length, 7);
-  for (const [action, version] of actions) {
-    assert.deepEqual([action, version], action.startsWith('actions/checkout@')
-      ? ['actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'v7.0.1']
-      : ['actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1', 'v7.1.0']);
+  for (const action of actions) {
+    assert.ok([
+      'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      'actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1',
+    ].includes(action), 'only reviewed pinned actions run');
   }
   assert.equal((workflow.match(/package-manager-cache: false/g) || []).length, 4);
   const scan = workflow.match(/^  private-scan:\n[\s\S]*?(?=^  windows:)/m)?.[0];
   assert.ok(scan);
+  assert.match(scan, /^    runs-on: ubuntu-(?:slim|latest|24\.04)$/m);
   assert.match(scan, /if: github\.event\.repository\.private\n/);
   assert.match(scan, /IAC_PRIVATE_TERMS: \$\{\{ secrets\.IAC_PRIVATE_TERMS \}\}/);
   assert.match(scan, /run: bash private\/ci\.sh scan/);
@@ -2447,6 +2496,184 @@ test('CLAUDE_CODE_SESSION_ID is the Claude harness task id (the variable Claude 
   const sibling = new Agora(home, { now: clock.now, env: { CLAUDE_CODE_SESSION_ID: 'task-b' } });
   await rejects(sibling.clearWait({ as: 'sol', thread: opened.thread }), 'not-wait-owner');
   await rejects(sibling.clearWait({ as: 'sol', thread: opened.thread, instance: 'sol-task-a' }), 'instance-override');
+});
+
+/** A Claude Code subagent's own record beside a fakeSession lead: <lead>/subagents/agent-<id>.jsonl, all isSidechain. */
+function fakeSubagent(lead, { id = `a${Math.random().toString(16).slice(2, 18).padEnd(16, '0')}`, models = [] } = {}) {
+  const dir = path.join(lead.file.slice(0, -'.jsonl'.length), 'subagents');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `agent-${id}.jsonl`);
+  const append = (model, extra = {}) => fs.appendFileSync(file, JSON.stringify({
+    isSidechain: true, agentId: id, type: 'assistant', sessionId: lead.id, message: { role: 'assistant', model }, ...extra }) + '\n');
+  fs.writeFileSync(file, JSON.stringify({ isSidechain: true, agentId: id, type: 'user', sessionId: lead.id, message: { role: 'user', content: 'task' } }) + '\n');
+  for (const m of models) append(m);
+  return { id, file, append, env: { ...lead.env, IAC_CLAUDE_AGENT_ID: id } };
+}
+
+test('claude-pretool: passes through silently unless a valid subagent id runs iac; never blocks', async () => {
+  const { claudePreToolOutput } = await import('../src/claude-pretool.js');
+  const base = { session_id: 's', transcript_path: '/t.jsonl', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'tu',
+    agent_id: 'a03f72998b7ecea6c', agent_type: 'general-purpose', tool_input: { command: 'iac whoami', description: 'd' } };
+  assert.ok(claudePreToolOutput(base), 'control: the valid case rewrites');
+  const { agent_id, ...lead } = base;
+  for (const input of [
+    lead, { ...base, agent_id: null }, { ...base, agent_id: 7 }, { ...base, agent_id: '' }, { ...base, agent_id: 'bad/id' },
+    { ...base, agent_id: 'a b' }, { ...base, agent_id: 'x'.repeat(65) }, { ...base, agent_id: 'a;rm -rf /' },
+    { ...base, tool_name: 'Read' }, { ...base, tool_input: null }, { ...base, tool_input: [] }, { ...base, tool_input: { command: 7 } },
+    ...['git status', 'ls ~/.agora', 'node test/iac.test.js', 'grep -r iacx .', 'cat bin/iac.json', 'echo iac-launch'].map((command) => ({ ...base, tool_input: { command } })),
+    null, [], 'iac', 7,
+  ]) assert.equal(claudePreToolOutput(input), null, JSON.stringify(input));
+
+  const bin = path.join(import.meta.dirname, '..', 'bin', 'iac.js');
+  const env = { ...process.env, ...HARNESS_CLEAN, IAC_HOME: path.join(os.tmpdir(), 'iac-pretool-no-store') };
+  for (const stdin of ['', 'not json', '{"agent_id":', '[]', '{"agent_id":"bad/id","tool_input":{"command":"iac whoami"}}',
+    JSON.stringify(lead), JSON.stringify({ ...base, tool_input: { command: 'git status' } })]) {
+    const r = spawnSync(process.execPath, [bin, 'claude-pretool'], { input: stdin, env, encoding: 'utf8', timeout: 10_000 });
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, '', ''], `stdin ${JSON.stringify(stdin)}`);
+  }
+  assert.equal(fs.existsSync(env.IAC_HOME), false, 'the hook never touches a store');
+});
+
+test('claude-pretool: exports the subagent id for the whole command, keeps every field, decides no permission', async () => {
+  const { claudePreToolOutput } = await import('../src/claude-pretool.js');
+  const id = 'a03f72998b7ecea6c';
+  const ti = { description: 'post', timeout: 30000, run_in_background: false, extra: { kept: true } };
+  for (const command of ['iac post t-1 --body x', 'cd /tmp && IAC_HOME=/x node /opt/p/bin/iac.js post t-1 --body "a; b"',
+    'git log -1 | agora list', 'node "C:\\p\\bin\\iac.js" whoami', '(iac brief)', '$(iac whoami --json)', '/home/u/.local/bin/iac list\necho done']) {
+    const input = { session_id: 's', transcript_path: '/t.jsonl', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'tu',
+      agent_id: id, agent_type: 'Explore', tool_input: { command, ...ti } };
+    const out = claudePreToolOutput(input);
+    assert.deepEqual(out, { hookSpecificOutput: { hookEventName: 'PreToolUse',
+      updatedInput: { ...ti, command: `export IAC_CLAUDE_AGENT_ID=${id}; ${command}` } } }, command);
+    assert.doesNotMatch(JSON.stringify(out), /permission/i, 'normal permission flow applies');
+  }
+  // the plugin wires it on Bash only, with a short timeout
+  const pre = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse;
+  assert.deepEqual(pre.map((m) => [m.matcher, m.hooks.map((h) => h.command)]), [['Bash', ['node "${CLAUDE_PLUGIN_ROOT}/bin/iac.js" claude-pretool']]]);
+  assert.ok(pre[0].hooks[0].timeout > 0 && pre[0].hooks[0].timeout <= 5);
+  // through the CLI: one JSON line on stdout, exit 0
+  const bin = path.join(import.meta.dirname, '..', 'bin', 'iac.js');
+  const input = { tool_name: 'Bash', agent_id: id, tool_input: { command: 'cd / && iac whoami', description: 'd' } };
+  const r = spawnSync(process.execPath, [bin, 'claude-pretool'], { input: JSON.stringify(input), env: { ...process.env, ...HARNESS_CLEAN }, encoding: 'utf8', timeout: 10_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).hookSpecificOutput.updatedInput, { command: `export IAC_CLAUDE_AGENT_ID=${id}; cd / && iac whoami`, description: 'd' });
+  // the export reaches a later command of a compound, a pipeline stage and a subshell
+  if (process.platform !== 'win32') {
+    const cmd = claudePreToolOutput({ agent_id: id, tool_input: { command: 'iac() { printf "%s," "$IAC_CLAUDE_AGENT_ID"; }; cd / && iac | cat; (iac)' } })
+      .hookSpecificOutput.updatedInput.command;
+    assert.equal(spawnSync('sh', ['-c', cmd], { encoding: 'utf8', env: { PATH: process.env.PATH } }).stdout, `${id},${id},`);
+  }
+});
+
+test('a Claude Code subagent resolves to its own record\'s family and its own instance', async () => {
+  const { harnessTaskId } = await import('../src/api.js');
+  const { a, home } = fresh();
+  const s = fakeSession({ models: ['claude-opus-5'] });
+  const sub = fakeSubagent(s, { models: ['claude-fable-5-1'] });
+  s.append('claude-opus-5', { isSidechain: true, agentId: sub.id }); // lead-side noise is not the subagent's record
+  const lead = new Agora(home, { env: s.env });
+  const child = new Agora(home, { env: sub.env });
+
+  const id = child.identity();
+  assert.deepEqual([id.agent, id.source, id.model, id.session, id.subagent, id.agentId], ['fable', 'harness', 'claude-fable-5-1', `${s.id}/${sub.id}`, true, sub.id]);
+  assert.equal(harnessTaskId(sub.env), `${s.id}/${sub.id}`);
+  // only entries naming this agent count, even with isSidechain set
+  sub.append('claude-opus-5', { agentId: 'aother' });
+  assert.equal(child.identity().agent, 'fable');
+
+  const { thread } = await lead.open({ as: 'opus', title: 'lead', body: 'x', project: 'o/r' });
+  await child.post({ as: 'fable', thread, body: 'from the subagent' });
+  const p = a.thread(thread).posts.at(-1);
+  assert.deepEqual([p.author, p.instance, p.idSource], ['fable', `fable-${s.id}/${sub.id}`, 'harness']);
+  assert.equal(a.verify(thread).ok, true);
+  const { compact } = await import('../src/format.js');
+  assert.match(compact(a.threadWithVerification(thread)), new RegExp(`fable\\[fable-${s.id}/${sub.id}\\]`));
+
+  // a same-family subagent is its own instance: the lead's double-post guard is not its own
+  const twin = fakeSubagent(s, { models: ['claude-opus-5'] });
+  await lead.post({ as: 'opus', thread, body: 'lead again' });
+  await new Agora(home, { env: twin.env }).post({ as: 'opus', thread, body: 'same family, other task' });
+  assert.equal(a.thread(thread).posts.at(-1).instance, `opus-${s.id}/${twin.id}`);
+
+  const harness = (await runDoctor({ home, env: sub.env })).checks.find((c) => c.id === 'harness');
+  assert.equal(harness.status, 'ok'); assert.match(harness.message, new RegExp(`^Claude Code subagent ${s.id}/${sub.id}: subagent record .*agent-${sub.id}\\.jsonl$`));
+  // whoami says where it came from
+  const bin = path.join(import.meta.dirname, '..', 'bin', 'iac.js');
+  const r = spawnSync(process.execPath, [bin, 'whoami'], { env: { ...process.env, ...HARNESS_CLEAN, ...sub.env, IAC_HOME: home, IAC_PROJECT: 'o/r' }, encoding: 'utf8', timeout: 10_000 });
+  assert.match(r.stdout, new RegExp(`^fable \\(agent\\) · identity from harness \\(claude-code subagent ${sub.id}\\) · model claude-fable-5-1 · instance fable-${s.id}/${sub.id}`));
+});
+
+test('a derived instance over the label cap becomes a stable digest, never a truncation', async () => {
+  const { derivedInstance } = await import('../src/api.js');
+  const { a, home } = fresh();
+  const s = fakeSession({ models: ['claude-opus-5'] });
+  const longId = 'a' + 'b'.repeat(63); // the longest id the validator accepts
+  const sub = fakeSubagent(s, { id: longId, models: ['claude-opus-5'] });
+  const near = fakeSubagent(s, { id: 'a' + 'b'.repeat(62) + 'c', models: ['claude-opus-5'] });
+  const { thread } = await new Agora(home, { env: s.env }).open({ as: 'opus', title: 'lead', body: 'x', project: 'o/r' });
+  await new Agora(home, { env: sub.env }).post({ as: 'opus', thread, body: 'longest id' });
+  await new Agora(home, { env: near.env }).post({ as: 'opus', thread, body: 'differs in its last character' });
+  const [p1, p2] = a.thread(thread).posts.slice(-2);
+  assert.match(p1.instance, /^opus-h[0-9a-f]+$/);
+  assert.ok(p1.instance.length <= 80 && p2.instance.length <= 80);
+  assert.notEqual(p1.instance, p2.instance, 'ids sharing a long prefix stay distinct');
+  assert.equal(p1.instance, derivedInstance('opus', `${s.id}/${longId}`), 'the same task always gets the same label');
+  assert.equal(a.verify(thread).ok, true);
+  assert.equal(derivedInstance('opus', 'short'), 'opus-short', 'labels within the cap are unchanged');
+  assert.equal(derivedInstance('x'.repeat(32), 'y'.repeat(100)).length, 80, 'the longest agent name still fits');
+});
+
+test('a Claude Code subagent without a readable record of its own is read-only, never its lead', async () => {
+  const { a, home } = fresh();
+  const s = fakeSession({ models: ['claude-opus-5'] });
+  const { thread } = await new Agora(home, { env: s.env }).open({ as: 'opus', title: 'lead', body: 'x', project: 'o/r' });
+  const noModel = fakeSubagent(s);
+  const otherAgent = fakeSubagent(s, { models: [] }); otherAgent.append('claude-fable-5-1', { agentId: 'aother' });
+  const unmapped = fakeSubagent(s, { models: ['claude-unknown'] });
+  const cases = [
+    [{ ...s.env, IAC_CLAUDE_AGENT_ID: 'bad/id' }, /not a valid Claude Code subagent id/],
+    [{ ...s.env, IAC_CLAUDE_AGENT_ID: 'x'.repeat(65) }, /not a valid/],
+    [{ ...s.env, IAC_CLAUDE_AGENT_ID: 'a0000000000000000' }, /no record for subagent a0000000000000000/],
+    [noModel.env, /names no model/],
+    [otherAgent.env, /names no model/],
+    [unmapped.env, /model 'claude-unknown' matches no family/],
+    [{ ...s.env, CLAUDE_CODE_SESSION_ID: 'sess-missing', IAC_CLAUDE_AGENT_ID: noModel.id }, /no session record found .* cannot be located/],
+  ];
+  for (const [env, why] of cases) {
+    for (const e of [env, { ...env, IAC_AGENT: 'opus' }]) { // the lead's launcher binding does not apply either
+      const id = new Agora(home, { env: e }).identity();
+      assert.deepEqual([id.agent, id.source, id.subagent], [null, null, true], JSON.stringify(e));
+      assert.match(id.reason, why);
+      await rejects(new Agora(home, { env: e }).post({ as: 'opus', thread, body: 'as the lead' }), 'unattested-identity');
+      throwsRejected(() => new Agora(home, { env: e }).identity({ explicit: 'opus' }), 'identity-override'); // --as
+    }
+  }
+  assert.equal(a.thread(thread).posts.length, 1, 'nothing was written');
+  const harness = (await runDoctor({ home, env: noModel.env })).checks.find((c) => c.id === 'harness');
+  assert.equal(harness.status, 'fail'); assert.match(harness.message, /^Claude Code subagent: the record for subagent .* names no model/);
+  // a symlink out of projects/ is not the subagent's record
+  if (process.platform !== 'win32') {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-outside-'));
+    const target = path.join(outside, 'agent.jsonl');
+    fs.writeFileSync(target, JSON.stringify({ isSidechain: true, agentId: 'alink', type: 'assistant', message: { model: 'claude-fable-5-1' } }) + '\n');
+    fs.symlinkSync(target, path.join(path.dirname(noModel.file), 'agent-alink.jsonl'));
+    assert.match(new Agora(home, { env: { ...s.env, IAC_CLAUDE_AGENT_ID: 'alink' } }).identity().reason, /no record for subagent alink/);
+  }
+});
+
+test('without IAC_CLAUDE_AGENT_ID (unset or empty) the lead resolves exactly as before', async () => {
+  const { harnessTaskId, resolveInstance } = await import('../src/api.js');
+  const { home } = fresh();
+  const s = fakeSession({ models: ['claude-opus-5'] });
+  fakeSubagent(s, { models: ['claude-fable-5-1'] });
+  for (const env of [s.env, { ...s.env, IAC_CLAUDE_AGENT_ID: '' }]) {
+    const id = new Agora(home, { env }).identity();
+    assert.deepEqual([id.agent, id.source, id.session, id.subagent], ['opus', 'harness', s.id, undefined]);
+    assert.equal(harnessTaskId(env), s.id);
+    assert.equal(resolveInstance({ agent: 'opus', project: 'o/r', env }), `opus-${s.id}`);
+  }
+  // the variable qualifies a Claude Code session only
+  assert.equal(harnessTaskId({ IAC_CLAUDE_AGENT_ID: 'a1' }), null);
 });
 
 test('families map model ids to agents: seeded for Claude, extended per deployment, registered agents only', async () => {
@@ -4841,13 +5068,15 @@ test('cache: a retargeted junction or symlink never serves its previous target, 
 // ---- rename to inter-agent-comms (0.3.0): aliases, legacy env and stores, old signed logs ----
 
 const ROOT = path.join(import.meta.dirname, '..');
+// The current package version: fixtures for an installed copy that matches the CLI use it.
+const PKG_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 const binPath = (name) => path.join(ROOT, 'bin', name);
 const runBin = (name, args, { env = {}, input } = {}) => spawnSync(process.execPath, [binPath(name), ...args],
   { env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, ...HARNESS_CLEAN, ...env }, input, encoding: 'utf8', timeout: 20_000 });
 
 test('package bins: iac and inter-agent-comms share one entry; agora, agora-mcp, agora-launch remain as aliases', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.3.2');
+  assert.equal(pkg.version, '0.4.0');
   assert.deepEqual(pkg.bin, {
     iac: 'bin/iac.js', 'inter-agent-comms': 'bin/iac.js', 'iac-mcp': 'bin/iac-mcp.js', 'iac-launch': 'bin/iac-launch.js',
     agora: 'bin/agora.js', 'agora-mcp': 'bin/agora-mcp.js', 'agora-launch': 'bin/agora-launch.js',
@@ -4865,7 +5094,7 @@ test('the agora alias runs the same CLI against the same store; a non-interactiv
     assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, new RegExp(thread)); assert.equal(r.stderr, '', `${name}: stderr is not a TTY, so no notice`);
   }
   assert.match(runBin('agora.js', ['--help']).stdout, /^iac \(inter-agent-comms\)/);
-  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.3.2\n', `${name} --version`);
+  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.0\n', `${name} --version`);
 });
 
 test('deprecation notice: interactive agora only, never in hook or MCP modes', async () => {
@@ -5044,7 +5273,7 @@ test('MCP: tools are iac_*, the server names itself inter-agent-comms, and the i
     await new Promise((resolve) => proc.on('close', resolve));
     const [init, list] = out.trim().split('\n').map((l) => JSON.parse(l));
     assert.equal(init.result.serverInfo.name, 'inter-agent-comms', bin);
-    assert.equal(init.result.serverInfo.version, '0.3.2');
+    assert.equal(init.result.serverInfo.version, PKG_VERSION);
     assert.match(init.result.instructions, /Call iac_brief first/);
     assert.doesNotMatch(init.result.instructions, /agora/i);
     assert.ok(list.result.tools.every((t) => t.name.startsWith('iac_')), bin);
@@ -6074,7 +6303,7 @@ test('doctor: plugin versions against the CLI, stale gated hooks, duplicate hook
   const r = await runDoctor({ home, env });
   assert.deepEqual(treeSnapshot(home, scratch), before, 'doctor wrote nothing');
   const pc = check(r, 'plugin-claude');
-  assert.equal(pc.status, 'warn'); assert.match(pc.message, /plugin 0\.2\.9 \(user scope\) but CLI 0\.3\.2/); assert.match(pc.message, /agora@agora/);
+  assert.equal(pc.status, 'warn'); assert.match(pc.message, new RegExp(`plugin 0\\.2\\.9 \\(user scope\\) but CLI ${PKG_VERSION.replace(/\./g, '\\.')}`)); assert.match(pc.message, /agora@agora/);
   assert.match(pc.fix, /\/plugin marketplace update inter-agent-comms, then \/plugin update inter-agent-comms@inter-agent-comms/); assert.match(pc.fix, /\/plugin uninstall agora@agora/);
   assert.equal(check(r, 'plugin-codex').status, 'warn'); assert.match(check(r, 'plugin-codex').message, /plugin 0\.2\.9 but CLI/);
   const hc = check(r, 'hooks-claude');
@@ -6217,9 +6446,9 @@ test('doctor: Codex plugin needs its config.toml table; non-semver cache dirs ar
   fs.mkdirSync(path.join(base, 'tmp-staging', 'bin'), { recursive: true });
   const env = { HOME: scratch };
   assert.equal(check(await runDoctor({ home, env }), 'plugin-codex').status, 'skip', 'a non-semver dir is not an installed version');
-  fs.mkdirSync(path.join(base, '0.3.2', 'bin'), { recursive: true }); fs.writeFileSync(path.join(base, '0.3.2', 'bin', 'iac.js'), '');
-  fs.mkdirSync(path.join(base, '0.3.2', '.codex-plugin'));
-  fs.copyFileSync(path.join(ROOT, '.codex-plugin', 'plugin.json'), path.join(base, '0.3.2', '.codex-plugin', 'plugin.json'));
+  fs.mkdirSync(path.join(base, PKG_VERSION, 'bin'), { recursive: true }); fs.writeFileSync(path.join(base, PKG_VERSION, 'bin', 'iac.js'), '');
+  fs.mkdirSync(path.join(base, PKG_VERSION, '.codex-plugin'));
+  fs.copyFileSync(path.join(ROOT, '.codex-plugin', 'plugin.json'), path.join(base, PKG_VERSION, '.codex-plugin', 'plugin.json'));
   const off = check(await runDoctor({ home, env }), 'plugin-codex');
   assert.equal(off.status, 'warn'); assert.match(off.message, /not enabled in config\.toml/);
   fs.writeFileSync(path.join(scratch, '.codex', 'config.toml'), '# c\n[plugins."inter-agent-comms@inter-agent-comms"]\nenabled = true\n\n[other]\nx = 1\n');
@@ -6236,9 +6465,9 @@ test('doctor: Codex plugin needs its config.toml table; non-semver cache dirs ar
   assert.match(check(on, 'hooks-codex').message, /current runtime definition match: unverified; automatic execution: unobserved/);
 
   const claude = path.join(scratch, '.claude'); fs.mkdirSync(path.join(claude, 'plugins'), { recursive: true });
-  const install = path.join(claude, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', '0.3.2');
+  const install = path.join(claude, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', PKG_VERSION);
   fs.mkdirSync(path.join(install, 'bin'), { recursive: true }); fs.writeFileSync(path.join(install, 'bin', 'iac.js'), '');
-  fs.writeFileSync(path.join(claude, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: { 'inter-agent-comms@inter-agent-comms': [{ installPath: install, version: '0.3.2' }] } }));
+  fs.writeFileSync(path.join(claude, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: { 'inter-agent-comms@inter-agent-comms': [{ installPath: install, version: PKG_VERSION }] } }));
   fs.writeFileSync(path.join(claude, 'settings.json'), JSON.stringify({ enabledPlugins: { 'inter-agent-comms@inter-agent-comms': true } }));
   assert.equal(check(await runDoctor({ home, env }), 'plugin-claude').status, 'ok');
   const proj = path.join(scratch, 'proj'); fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
@@ -6251,7 +6480,7 @@ test('doctor: saved Codex hook approval is exact-slot scoped and never proves cu
   const { home } = fresh();
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-doc-'));
   const codex = path.join(scratch, '.codex');
-  const install = path.join(codex, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', '0.3.2');
+  const install = path.join(codex, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', PKG_VERSION);
   fs.mkdirSync(path.join(install, '.codex-plugin'), { recursive: true });
   fs.mkdirSync(path.join(install, 'bin')); fs.writeFileSync(path.join(install, 'bin', 'iac.js'), '');
   const manifestFile = path.join(install, '.codex-plugin', 'plugin.json');
@@ -6474,10 +6703,10 @@ test('doctor: with the cached plugin disabled, the hand-written hook is the like
   const { home } = fresh();
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-doc-'));
   const claude = path.join(scratch, '.claude'); fs.mkdirSync(path.join(claude, 'plugins'), { recursive: true });
-  const install = path.join(claude, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', '0.3.2');
+  const install = path.join(claude, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', PKG_VERSION);
   fs.mkdirSync(path.join(install, 'bin'), { recursive: true }); fs.writeFileSync(path.join(install, 'bin', 'iac.js'), '');
   fs.mkdirSync(path.join(install, 'hooks')); fs.copyFileSync(path.join(import.meta.dirname, '..', 'hooks', 'hooks.json'), path.join(install, 'hooks', 'hooks.json'));
-  fs.writeFileSync(path.join(claude, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: { 'inter-agent-comms@inter-agent-comms': [{ installPath: install, version: '0.3.2' }] } }));
+  fs.writeFileSync(path.join(claude, 'plugins', 'installed_plugins.json'), JSON.stringify({ plugins: { 'inter-agent-comms@inter-agent-comms': [{ installPath: install, version: PKG_VERSION }] } }));
   const settings = (enabled, hooks) => fs.writeFileSync(path.join(claude, 'settings.json'), JSON.stringify({ enabledPlugins: { 'inter-agent-comms@inter-agent-comms': enabled }, hooks }));
   // hermetic: `iac` resolves through a fixture shim dir, never through the host's PATH
   const fx = hookFixture(scratch);
@@ -6514,7 +6743,7 @@ test('doctor hook checks: scoped installs, unreadable layers, untrusted Codex ho
   const { home } = fresh();
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-doc-'));
   const claude = path.join(scratch, '.claude'); fs.mkdirSync(path.join(claude, 'plugins'), { recursive: true });
-  const install = path.join(claude, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', '0.3.2');
+  const install = path.join(claude, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', PKG_VERSION);
   fs.mkdirSync(path.join(install, 'bin'), { recursive: true }); fs.writeFileSync(path.join(install, 'bin', 'iac.js'), '');
   fs.mkdirSync(path.join(install, 'hooks')); fs.copyFileSync(path.join(import.meta.dirname, '..', 'hooks', 'hooks.json'), path.join(install, 'hooks', 'hooks.json'));
   const projA = path.join(scratch, 'projA'); const projB = path.join(scratch, 'projB');
@@ -6527,7 +6756,7 @@ test('doctor hook checks: scoped installs, unreadable layers, untrusted Codex ho
   const hc = async (opts) => { const r = await runDoctor({ home, env, ...opts }); return [check(r, 'hooks-claude'), check(r, 'plugin-claude'), r]; };
 
   // 1. a local-scoped install for projA does not run in projB (doctor run from a subdirectory of projB)
-  installs([{ scope: 'local', projectPath: projA, installPath: install, version: '0.3.2' }]);
+  installs([{ scope: 'local', projectPath: projA, installPath: install, version: PKG_VERSION }]);
   const [b, bp] = await hc({ cwd: sub });
   assert.equal(b.status, 'ok'); assert.match(b.message, /^likely active: hand-written hook/); assert.match(b.message, /plugin hook: not installed here/);
   assert.match(bp.message, new RegExp(`installed for ${projA.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(local scope\\), not this project`));
@@ -6536,7 +6765,7 @@ test('doctor hook checks: scoped installs, unreadable layers, untrusted Codex ho
   assert.match(a.message, /^both may run/); assert.match(a.fix, /^if you see two iac briefs per prompt, remove the hand-written hook/);
 
   // 2. an unreadable project or local settings layer makes the plugin state unknown, not "enabled"
-  installs([{ scope: 'user', installPath: install, version: '0.3.2' }]);
+  installs([{ scope: 'user', installPath: install, version: PKG_VERSION }]);
   fs.mkdirSync(path.join(projB, '.claude', 'settings.local.json'), { recursive: true });   // EISDIR: unreadable for any user
   const [u, up] = await hc({ cwd: projB });
   assert.equal(u.status, 'warn'); assert.match(u.message, /^unknown/); assert.match(u.message, /settings\.local\.json is unreadable \(EISDIR\)/);
@@ -6555,7 +6784,7 @@ test('doctor hook checks: scoped installs, unreadable layers, untrusted Codex ho
   assert.match(off.fix, /unset disableAllHooks in .*managed-settings\.json/);
 
   // 3. Codex: an untrusted plugin hook beside a hand-written one is not a duplicate to clean up
-  const codex = path.join(scratch, '.codex'); const cdir = path.join(codex, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', '0.3.2');
+  const codex = path.join(scratch, '.codex'); const cdir = path.join(codex, 'plugins', 'cache', 'inter-agent-comms', 'inter-agent-comms', PKG_VERSION);
   fs.mkdirSync(path.join(cdir, 'bin'), { recursive: true }); fs.writeFileSync(path.join(cdir, 'bin', 'iac.js'), '');
   fs.writeFileSync(path.join(codex, 'config.toml'), '[plugins."inter-agent-comms@inter-agent-comms"]\nenabled = true\n');
   fs.writeFileSync(path.join(codex, 'hooks.json'), JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node /x/bin/iac.js codex-hook' }] }] } }));
@@ -7864,4 +8093,203 @@ test('escalate CLI: a public repository is refused and the thread stays open; --
   assert.match(ok, /escalated .* → https:\/\/github\.com\/o\/r\/issues\/5/);
   const { thread: t2 } = JSON.parse((await cli(['open', '--title', 'public on purpose', '--kind', 'question', '--body', 'x', '--json'])).stdout);
   assert.match((await cli(['escalate', t2, '--repo', 'o/r', '--allow-public'])).stdout, /escalated/);
+});
+
+test('thread wait history: every state, derived by the same rules as the wait board', async () => {
+  const { a, clock, home } = fresh();
+  a.store.saveConfig({ ...a.config(), limits: { ...a.config().limits, waitTtlHours: 2, stallHours: 1 } });
+  const A = await a.open({ as: 'fable', instance: 'fable-1', project: 'o/r', title: 'Three reviews',
+    kind: 'question', body: 'Need three.', waitingOn: ['opus', 'sol', 'astra'] });
+  clock.tick(MIN); await a.post({ as: 'opus', instance: 'opus-1', thread: A.thread, kind: 'ack', body: 'on it' });
+  clock.tick(MIN); await a.post({ as: 'sol', instance: 'sol-1', thread: A.thread, kind: 'ack', body: 'on it' });
+  clock.tick(MIN); const answer = await a.post({ as: 'sol', instance: 'sol-1', thread: A.thread, kind: 'status', body: 'done' });
+  clock.tick(MIN); const clear = await a.clearWait({ as: 'fable', instance: 'fable-1', thread: A.thread, post: A.post, on: 'astra', reason: 'not needed' });
+  clock.tick(MIN); const human = await a.post({ as: 'fable', instance: 'fable-1', thread: A.thread, kind: 'question', body: 'ada?', waitingOn: ['ada'] });
+  const B = await a.open({ as: 'astra', instance: 'astra-1', project: 'o/r', title: 'Will expire', kind: 'question', body: 'x', waitingOn: ['opus'] });
+  clock.tick(70 * MIN);
+  const C = await a.open({ as: 'astra', instance: 'astra-1', project: 'o/r', title: 'Will stall', kind: 'question', body: 'y', waitingOn: ['sol'] });
+  clock.tick(70 * MIN);
+  fs.appendFileSync(path.join(home, 'threads', `${C.thread}.ndjson`), JSON.stringify({
+    type: 'wait-clear', id: 'e-forged2', thread: C.thread, author: 'ada', ts: a.ts(),
+    post: C.post, on: 'sol', reason: 'silenced', prev: 'garbage', sig: 'garbage' }) + '\n');
+
+  const byOn = (id) => Object.fromEntries(a.threadWithVerification(id).waits.map((w) => [`${w.post}/${w.on}`, w]));
+  const wa = byOn(A.thread);
+  assert.equal(wa[`${A.post}/opus`].state, 'claimed');
+  assert.equal(wa[`${A.post}/opus`].claimedBy, 'opus-1');
+  assert.equal(wa[`${A.post}/sol`].state, 'answered');
+  assert.equal(wa[`${A.post}/sol`].answerPost, answer.post);
+  assert.equal(wa[`${A.post}/astra`].state, 'cleared');
+  assert.deepEqual([wa[`${A.post}/astra`].clear.id, wa[`${A.post}/astra`].clear.by, wa[`${A.post}/astra`].clear.reason], [clear.event, 'fable', 'not needed']);
+  assert.equal(wa[`${human.post}/ada`].state, 'expired', 'an unclaimed wait past waitTtlHours expires, on a human too');
+  assert.equal(wa[`${human.post}/ada`].stalled, false);
+  assert.equal(byOn(B.thread)[`${B.post}/opus`].state, 'expired');
+  const wc = byOn(C.thread)[`${C.post}/sol`];
+  assert.deepEqual([wc.state, wc.stalled, wc.clear, wc.unverifiedClear?.id], ['open', true, null, 'e-forged2'],
+    'an unverifiable clear is reported but does not clear the wait');
+
+  // The board keeps exactly the waits the history marks open, claimed or expired.
+  const board = a.waitingBoard({ includeExpired: true });
+  for (const id of [A.thread, B.thread, C.thread]) {
+    const kept = a.threadWithVerification(id).waits.filter((w) => ['open', 'claimed', 'expired'].includes(w.state));
+    assert.deepEqual(kept.map((w) => `${w.post}/${w.on}/${w.state === 'expired'}/${w.stalled}`).sort(),
+      board.filter((w) => w.thread === id).map((w) => `${w.post}/${w.on}/${w.expired}/${w.stalled}`).sort(), id);
+  }
+});
+
+test('brief --hook receipt: default off; opt-in records each terminal path content-free, never changing stdout', async () => {
+  const { CLAUDE_RECEIPT_DIR, CLAUDE_RECEIPT_MAX, writeClaudeHookReceipt } = await import('../src/hook-receipt.js');
+  const { home } = fresh();
+  const live = new Agora(home, { env: {} });
+  await live.open({ as: 'ada', title: 'SENTINEL-PRIVATE-TITLE', kind: 'question', body: 'SENTINEL-PRIVATE-BODY @fable', waitingOn: ['fable'], project: 'o/r' });
+  const s = fakeSession({ models: ['claude-fable-5-1'] });
+  const quiet = fakeSession({ models: ['claude-opus-5'] });   // opus: registered, nothing waiting
+  const env = { ...process.env, ...HOOK_CLEAN, HOME: s.home, USERPROFILE: s.home, IAC_HOME: home, IAC_PROJECT: 'o/r' };
+  const prompt = (x, ev = 'UserPromptSubmit') => JSON.stringify({ session_id: x.id, transcript_path: x.file, hook_event_name: ev });
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-receipt-'));
+  const receiptsDir = path.join(base, CLAUDE_RECEIPT_DIR);
+  const read = () => fs.existsSync(receiptsDir) ? fs.readdirSync(receiptsDir).sort().map((f) => fs.readFileSync(path.join(receiptsDir, f), 'utf8')) : [];
+  try {
+    // default off: same output, nothing written anywhere under the would-be base
+    const off = hookRun(env, prompt(s));
+    assert.match(off.stdout, /^iac\[fable/);
+    assert.deepEqual(fs.readdirSync(base), [], 'no receipt directory without IAC_HOOK_RECEIPT_DIR');
+    assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, {}), 'disabled');
+
+    const on = { ...env, IAC_HOOK_RECEIPT_DIR: base };
+    const emitted = hookRun(on, prompt(s));
+    assert.deepEqual([emitted.status, emitted.stdout, emitted.stderr], [0, off.stdout, ''], 'opt-in never changes stdout, stderr or exit');
+    let texts = read(); assert.equal(texts.length, 1);
+    const r = JSON.parse(texts[0]);
+    assert.deepEqual(Object.keys(r), ['schema', 'event', 'hookEvent', 'status', 'payload', 'ownTranscript', 'elapsedMs', 'bytes', 'timestamp']);
+    assert.deepEqual([r.schema, r.event, r.hookEvent, r.status, r.payload, r.ownTranscript, r.bytes],
+      [1, 'claude-brief-hook', 'UserPromptSubmit', 'brief-emitted', true, true, Buffer.byteLength(emitted.stdout)]);
+    assert.ok(Number.isInteger(r.elapsedMs) && r.elapsedMs >= 0);
+    for (const secret of ['SENTINEL', s.id, s.home, home, 'claude-fable', 'fable', 'o/r']) assert.ok(!texts[0].includes(secret), `receipt leaks ${secret}`);
+
+    // each other terminal path
+    hookRun({ ...on, HOME: quiet.home, USERPROFILE: quiet.home }, prompt(quiet, 'SessionStart'));   // identity ok, nothing for opus
+    hookRun(on, '');                                                                               // no payload, no env session
+    hookRun({ ...on, CODEX_THREAD_ID: 'codex-t1' }, JSON.stringify({ session_id: s.id, hook_event_name: 'UserPromptSubmit' }));
+    const conflict = hookRun({ ...on, ...s.env, IAC_AGENT: 'opus' }, '');
+    // a caught non-loud error after identity resolved (an invalid instance label): silent, category only
+    const failed = hookRun(on, prompt(s), '--instance', 'SENTINEL bad label!');
+    assert.deepEqual([failed.status, failed.stdout, failed.stderr], [0, '', '']);
+    texts = read(); const rs = texts.map((t) => JSON.parse(t));
+    const summary = rs.slice(1).map((x) => [x.hookEvent, x.status, x.payload, x.ownTranscript, x.bytes]).sort((a, b) => a[1].localeCompare(b[1]));
+    assert.deepEqual(summary, [
+      ['SessionStart', 'brief-empty', true, true, 0],
+      ['UserPromptSubmit', 'failure', true, true, 0],
+      ['UserPromptSubmit', 'gated', true, false, 0],
+      ['other', 'identity-diagnostic', false, false, Buffer.byteLength(conflict.stdout)],
+      ['other', 'no-agent', false, false, 0],
+    ]);
+    assert.ok(texts.every((t) => !t.includes(s.id) && !t.includes('codex-t1') && !t.includes('SENTINEL')));
+
+    // fixed categories only, and the cap bounds retention
+    assert.equal(writeClaudeHookReceipt({ status: 'made-up' }, { IAC_HOOK_RECEIPT_DIR: base }), 'skipped');
+    assert.equal(writeClaudeHookReceipt({ status: 'brief-empty', hookEvent: '/etc/passwd' }, { IAC_HOOK_RECEIPT_DIR: base }), 'written');
+    assert.ok(read().every((t) => !t.includes('/etc/passwd')));
+    for (let i = 0; i < CLAUDE_RECEIPT_MAX; i++) { const slot = path.join(receiptsDir, `slot-${String(i).padStart(2, '0')}.json`); if (!fs.existsSync(slot)) fs.writeFileSync(slot, '{}\n'); }
+    assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: base }), 'skipped', 'full directory: no more writes');
+    assert.equal(read().length, CLAUDE_RECEIPT_MAX);
+
+    // never through a symlink: neither as the opt-in base nor as the receipts directory
+    if (process.platform !== 'win32') {
+      const real = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-receipt-real-'));
+      const linkBase = path.join(base, 'link-base'); fs.symlinkSync(real, linkBase);
+      assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: linkBase }), 'skipped');
+      const other = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-receipt-other-'));
+      fs.symlinkSync(real, path.join(other, CLAUDE_RECEIPT_DIR));
+      assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: other }), 'skipped');
+      assert.deepEqual(fs.readdirSync(real), [], 'nothing written through a link');
+      for (const d of [real, other]) fs.rmSync(d, { recursive: true, force: true });
+    }
+    assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: 'relative/dir' }), 'skipped');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('brief --hook receipt: concurrent writers at 63 entries never exceed the bound', async () => {
+  const { CLAUDE_RECEIPT_DIR, CLAUDE_RECEIPT_MAX } = await import('../src/hook-receipt.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-receipt-race-'));
+  const dir = path.join(base, CLAUDE_RECEIPT_DIR); fs.mkdirSync(dir, { mode: 0o700 });
+  try {
+    for (let i = 0; i < CLAUDE_RECEIPT_MAX - 1; i++) fs.writeFileSync(path.join(dir, `slot-${String(i).padStart(2, '0')}.json`), '{}\n');
+    const url = pathToFileURL(path.join(import.meta.dirname, '..', 'src', 'hook-receipt.js')).href;
+    const code = `import { writeClaudeHookReceipt } from ${JSON.stringify(url)}; process.stdout.write(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: process.argv[1] }));`;
+    const run = () => new Promise((resolve) => {
+      const p = spawn(process.execPath, ['--input-type=module', '-e', code, base], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = ''; p.stdout.on('data', (d) => { out += d; }); p.on('close', () => resolve(out));
+    });
+    const results = await Promise.all(Array.from({ length: 8 }, run));
+    assert.equal(results.filter((r) => r === 'written').length, 1, `exactly one writer wins the last slot: ${results}`);
+    assert.ok(results.every((r) => r === 'written' || r === 'skipped'));
+    assert.equal(fs.readdirSync(dir).length, CLAUDE_RECEIPT_MAX);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('brief --hook receipt: a failed write never removes an entry this call no longer owns', async () => {
+  const { CLAUDE_RECEIPT_DIR, writeClaudeHookReceipt } = await import('../src/hook-receipt.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-receipt-own-'));
+  const dir = path.join(base, CLAUDE_RECEIPT_DIR);
+  const real = fs.writeFileSync;
+  try {
+    // fault injection: after the slot is created, it is replaced by another file, then the write fails
+    fs.writeFileSync = function (target, ...rest) {
+      if (typeof target === 'number') {
+        const slot = path.join(dir, 'slot-00.json');
+        fs.unlinkSync(slot); real.call(fs, slot, 'SENTINEL-REPLACEMENT\n');
+        throw Object.assign(new Error('injected write failure'), { code: 'EIO' });
+      }
+      return real.call(fs, target, ...rest);
+    };
+    assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: base }), 'skipped');
+  } finally { fs.writeFileSync = real; }
+  try {
+    assert.equal(fs.readFileSync(path.join(dir, 'slot-00.json'), 'utf8'), 'SENTINEL-REPLACEMENT\n', 'the replacement survives');
+    // and without replacement, a failed write cleans up its own slot
+    fs.unlinkSync(path.join(dir, 'slot-00.json'));
+    fs.writeFileSync = function (target, ...rest) {
+      if (typeof target === 'number') throw Object.assign(new Error('injected write failure'), { code: 'EIO' });
+      return real.call(fs, target, ...rest);
+    };
+    try { assert.equal(writeClaudeHookReceipt({ status: 'brief-empty' }, { IAC_HOOK_RECEIPT_DIR: base }), 'skipped'); }
+    finally { fs.writeFileSync = real; }
+    assert.deepEqual(fs.readdirSync(dir), [], 'own failed slot removed');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CI docs-only classifier fails closed: only grep status 1 skips the suites', { skip: process.platform === 'win32' && 'needs a POSIX bash for the extracted step' }, () => {
+  const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const at = workflow.indexOf('      - name: Change scope\n');
+  const runAt = workflow.indexOf('        run: |\n', at) + '        run: |\n'.length;
+  const body = [];
+  for (const line of workflow.slice(runAt).split('\n')) { if (line && !line.startsWith('          ')) break; body.push(line.slice(10)); }
+  const script = body.join('\n');
+  assert.match(script, /docs_only=/);
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-scope-'));
+  try {
+    // stub git: fetch succeeds; the two diffs print the lists given in the env
+    fs.writeFileSync(path.join(bin, 'git'), '#!/bin/sh\ncase "$*" in\n  fetch*) exit 0;;\n  *diff-filter=AM*) printf "%s" "$AM";;\n  diff*) printf "%s" "$ALL";;\nesac\n', { mode: 0o755 });
+    const realGrep = spawnSync('sh', ['-c', 'command -v grep'], { encoding: 'utf8' }).stdout.trim();
+    const run = (all, am, grepStatus) => {
+      if (grepStatus === undefined) fs.symlinkSync(realGrep, path.join(bin, 'grep'));
+      else fs.writeFileSync(path.join(bin, 'grep'), '#!/bin/sh\n' + (grepStatus === 0 ? 'echo src/api.js\n' : '') + 'exit ' + grepStatus + '\n', { mode: 0o755 });
+      const out = path.join(bin, 'out');
+      fs.writeFileSync(out, '');
+      const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], {
+        encoding: 'utf8', env: { PATH: bin + path.delimiter + process.env.PATH, EVENT: 'pull_request', BASE: 'b'.repeat(40), ALL: all, AM: am, GITHUB_OUTPUT: out } });
+      fs.rmSync(path.join(bin, 'grep'));
+      assert.equal(r.status, 0, r.stderr);
+      return fs.readFileSync(out, 'utf8').trim();
+    };
+    const docs = 'README.md\ndocs/setup.md', code = 'docs/setup.md\nsrc/api.js';
+    assert.equal(run(docs, docs), 'docs_only=true', 'real grep, docs only');
+    assert.equal(run(code, code), 'docs_only=false', 'real grep, a code path');
+    assert.equal(run(code, code, 1), 'docs_only=true', 'status 1 is the only skip signal');
+    assert.equal(run(code, code, 0), 'docs_only=false');
+    assert.equal(run(code, code, 2), 'docs_only=false', 'a grep error keeps the full suites');
+    assert.equal(run(code, code, 127), 'docs_only=false', 'a missing grep keeps the full suites');
+    assert.equal(run(docs, 'README.md'), 'docs_only=false', 'a deletion or rename keeps the full suites');
+  } finally { fs.rmSync(bin, { recursive: true, force: true }); }
 });

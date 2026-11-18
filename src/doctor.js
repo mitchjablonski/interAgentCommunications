@@ -270,9 +270,10 @@ export function doctor({ home, why, env = process.env, resolve, cliRoot = PKG_RO
   if (!h) add('harness', 'skip', 'not in a Claude Code session or a Codex task shell (no CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID): identity comes from IAC_AGENT (iac-launch) or --as');
   else if (h.harness === 'ambiguous') add('harness', 'fail', h.conflict, 'start the inner harness outside the parent harness, or bind it explicitly with iac-launch');
   else if (h.harness === 'claude-code') {
-    if (!h.transcript) add('harness', 'warn', `Claude Code session ${h.session}: no transcript under ${path.join(cdir, 'projects')}`, 'a brand-new session writes it with the first prompt; if this persists, HOME or CLAUDE_CONFIG_DIR here differs from Claude Code\'s');
+    if (h.subagentProblem) add('harness', 'fail', `Claude Code subagent: ${h.subagentProblem}`, 'a subagent is read-only until its own record names its model; IAC_CLAUDE_AGENT_ID comes from the plugin\'s PreToolUse hook and should not be set by hand');
+    else if (!h.transcript) add('harness', 'warn', `Claude Code session ${h.session}: no transcript under ${path.join(cdir, 'projects')}`, 'a brand-new session writes it with the first prompt; if this persists, HOME or CLAUDE_CONFIG_DIR here differs from Claude Code\'s');
     else {
-      add('harness', 'ok', `Claude Code session ${h.session}: transcript ${h.transcript}`);
+      add('harness', 'ok', `Claude Code ${h.subagent ? 'subagent' : 'session'} ${h.session}: ${h.subagent ? 'subagent record' : 'transcript'} ${h.transcript}`);
       if (h.model) add('model', 'ok', `${h.model} (from the ${h.modelVia === 'attachment' ? 'model attachment' : 'latest assistant entry'})`);
       else if (h.switching) add('model', 'warn', 'a /model switch is newer than any model evidence: unknown until the next prompt announces it', 'send one more prompt; read-only until then');
       else if (h.modelUnknown) add('model', 'warn', 'no model evidence in the transcript tail within the scan cap, or it could not be read', 'send a prompt (it re-announces the model), or bind the session with iac-launch <name>');

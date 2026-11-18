@@ -38,17 +38,44 @@ jobs:
             echo "refusing: private/ is present but the repository is not private" >&2
             exit 1
           fi
+      # Docs-only PR (only added/modified *.md at the root or under docs/): skip
+      # the test suites. Privacy, archive, pack and private tooling still run, and
+      # main pushes, manual runs, deletions and renames always run everything.
+      - name: Change scope
+        id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          docs_only=false
+          if [ "$EVENT" = pull_request ] && [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+            all="$(git diff --name-only "$BASE" HEAD)"
+            added_or_modified="$(git diff --name-only --diff-filter=AM "$BASE" HEAD)"
+            if [ -n "$all" ] && [ "$all" = "$added_or_modified" ]; then
+              # grep exits 1 only when no line is outside the docs whitelist; 0 (a code path),
+              # 2 (an error) or 127 (missing) all keep the full test suites.
+              classifier=0
+              grep -vE '^(docs/.+|[^/]+\.md)$' <<<"$all" >/dev/null || classifier=$?
+              if [ "$classifier" -eq 1 ]; then docs_only=true; fi
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs-only change: $docs_only"
       - run: npm test
+        if: steps.scope.outputs.docs_only != 'true'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           package-manager-cache: false
           node-version: '24'
       - run: npm test
+        if: steps.scope.outputs.docs_only != 'true'
       - name: Private tooling at Node 24
         if: github.event.repository.private
         run: bash private/ci.sh test
         shell: bash
       - name: Concurrent writers keep the hash chain valid
+        if: steps.scope.outputs.docs_only != 'true'
         run: bash test/lock-stress.sh 8 5
       - name: Export-ignored and local files are absent from the archive
         run: |
@@ -111,7 +138,7 @@ jobs:
   # scan still runs; the coverage note distinguishes that optional extra check.
   private-scan:
     if: github.event.repository.private
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 10
     env:
       IAC_PRIVATE_TERMS: ${{ secrets.IAC_PRIVATE_TERMS }}
@@ -132,7 +159,32 @@ jobs:
         with:
           package-manager-cache: false
           node-version: '24'
+      # Docs-only PR (only added/modified *.md at the root or under docs/): skip
+      # the test suites. Privacy, archive, pack and private tooling still run, and
+      # main pushes, manual runs, deletions and renames always run everything.
+      - name: Change scope
+        id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          docs_only=false
+          if [ "$EVENT" = pull_request ] && [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE"; then
+            all="$(git diff --name-only "$BASE" HEAD)"
+            added_or_modified="$(git diff --name-only --diff-filter=AM "$BASE" HEAD)"
+            if [ -n "$all" ] && [ "$all" = "$added_or_modified" ]; then
+              # grep exits 1 only when no line is outside the docs whitelist; 0 (a code path),
+              # 2 (an error) or 127 (missing) all keep the full test suites.
+              classifier=0
+              grep -vE '^(docs/.+|[^/]+\.md)$' <<<"$all" >/dev/null || classifier=$?
+              if [ "$classifier" -eq 1 ]; then docs_only=true; fi
+            fi
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "docs-only change: $docs_only"
       - run: npm test
+        if: steps.scope.outputs.docs_only != 'true'
       - name: Private tooling at Node 24
         if: github.event.repository.private
         run: bash private/ci.sh test

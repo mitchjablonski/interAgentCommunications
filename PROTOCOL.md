@@ -124,8 +124,8 @@ Quarantine creation is exclusive; an existing or racing `<thread>.damaged`
 blocks repair and is never overwritten or removed. The retained raw bytes plus
 audit are prepared in a unique sibling candidate and replace the original in
 one rename. Failures preserve recovery artifacts and report their paths for
-manual inspection; a healthy retry adds no duplicate audit. See the README's
-recovery instructions and durability limits.
+manual inspection; a healthy retry adds no duplicate audit. See
+[troubleshooting](docs/troubleshooting.md) for recovery instructions and durability limits.
 
 Upgrade all clients sharing the store before using repair. Earlier readers
 classify the new `repair` event as malformed, and later linked events may show

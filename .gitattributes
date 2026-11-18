@@ -2,3 +2,4 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 /private export-ignore
+/.github/workflows/viewer-ui.yml export-ignore
