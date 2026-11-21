@@ -26,10 +26,11 @@
   button { font:inherit; font-size:13px; min-height:36px; padding:0 14px; border:0; border-radius:6px; background:var(--accent); color:var(--on-accent); cursor:pointer; }
   button.primary { background:var(--primary); color:var(--on-primary); font-weight:600; }
   button.ghost { background:var(--panel); color:var(--fg); border:1px solid var(--firm); }
-  button:disabled { opacity:.6; cursor:default; }
+  button:disabled, button[aria-disabled="true"] { opacity:.6; cursor:default; }
   .status-lines { padding:0 20px; font-size:12px; color:var(--muted); }
   .status-lines > * { margin:4px 0; }
-  .status-lines #actionResult:empty, .status-lines #sendResult:empty { display:none; }
+  .status-lines #actionResult:empty { display:none; }
+  .status-lines #sendResult:empty { margin:0; }
   #createdTarget { margin:6px 20px; }
   main { display:flex; flex-wrap:wrap; min-height: calc(100vh - 57px); }
   aside { flex:1 1 280px; max-width:320px; min-width:0; background:var(--nav); border-right:1px solid var(--line); padding:16px 10px 10px; display:flex; flex-direction:column; gap:18px; }
@@ -111,12 +112,26 @@
   .status-lines p { margin:4px 0; }
   .row { display:flex; flex-wrap:wrap; align-items:flex-end; gap:8px 12px; }
   .row .field { font-weight:400; color:var(--soft); }
+  .field, .field > input, .field > select, .field > textarea { min-width:0; max-width:100%; }
+  header > *, .status-lines, .conv-title, .conv-body, .compose, .wait, .thread-button, .attention-card { overflow-wrap:anywhere; }
   .compose details { font-size:12px; color:var(--soft); }
   .compose details summary { cursor:pointer; line-height:1.4; padding:9px 0; }
   .err { color:var(--bad); font-size:12px; white-space:pre-wrap; }
   .err:empty { display:none; }
   .empty { color:var(--muted); padding:30px 28px; }
   .tl li.empty { padding:10px 8px; font-size:12px; }
+  /* A magnified or narrow browser needs normal document scrolling and compact gutters. */
+  @media (max-width: 480px) {
+    header { padding-inline:12px; }
+    header > *, header select, header .search, .head-end { min-width:0; max-width:100%; }
+    header .search { flex:1 1 100%; }
+    .head-end { width:100%; margin-left:0; }
+    .status-lines { padding-inline:12px; }
+    main { display:block; }
+    .conv-head, .conv-body, .compose { padding-inline:14px; }
+    .actions-menu, .actions { min-width:0; max-width:100%; }
+    .row > .field { flex:1 1 100%; }
+  }
 </style>
 </head>
 <body>
@@ -126,7 +141,7 @@
   <label class="search" for="search"><span class="sr-only">Search thread results</span><input id="search" disabled type="search" placeholder="Search threads" autocomplete="off"></label>
   <span class="head-end"><a href="#conversationStart" id="jumpConversation">Go to conversation</a><button class="ghost" id="refreshBtn" title="Refresh / retry: reload the board and release checked holds">Refresh</button><button class="primary" id="newBtn" disabled>New thread</button></span>
 </header>
-<div class="status-lines"><p><span id="meta" role="status">Loading board…</span></p><p id="freshness" role="status">No successful refresh yet.</p><div id="actionResult" role="status"></div><div id="sendResult" role="status"></div></div>
+<div class="status-lines"><p><span id="meta">Loading board…</span></p><p id="freshness">No successful refresh yet.</p><div id="refreshResult" class="sr-only" role="status" aria-atomic="true"></div><div id="actionResult" role="status"></div><div id="sendResult" role="status" aria-atomic="true"></div></div>
 <button class="ghost" id="createdTarget" hidden></button>
 <main>
   <aside>
@@ -215,7 +230,18 @@ function focusKey(el) {
 function setComposerBusy() {
   const busy = inFlight.has(renderedKey);
   document.querySelectorAll('.compose input,.compose textarea,.compose select').forEach(el => el.disabled = busy);
-  const send = $('#send'); if (send) { send.disabled = busy || sendNeedsCheck.has(renderedKey); send.setAttribute('aria-busy', String(busy)); if (busy) send.textContent = 'Sending…'; }
+  const send = $('#send');
+  if (send) {
+    const held = sendNeedsCheck.has(renderedKey);
+    // Keep keyboard focus during a pending send or an unconfirmed write hold.
+    // The Send handler blocks activation in both states.
+    send.setAttribute('aria-disabled', String(busy || held));
+    if (held) send.setAttribute('aria-describedby', 'err');
+    else send.removeAttribute('aria-describedby');
+    send.setAttribute('aria-busy', String(busy));
+    const label = busy ? 'Sending…' : renderedKey === newDraftKey ? 'Open thread' : 'Send';
+    if (send.textContent !== label) send.textContent = label;
+  }
 }
 function saveDraft() {
   if (!renderedKey) return;
@@ -274,12 +300,20 @@ function waitTimeline(t) {
       : w.state === 'cleared' ? `by <b>${esc(w.clear.by)}</b> in ${link(w.clear.id, esc(w.clear.id))}: ${esc(w.clear.reason || '')}`
       : `unclaimed past ${esc(state.limits.waitTtlHours)}h, so no longer on the wait panels`;
     if (w.unverifiedClear) detail += ` · a clear by ${esc(w.unverifiedClear.by)} failed verification and is not counted`;
-    return `<li class="wait-row is-${w.state}"><span class="wait-state">${label[w.state]}</span> <b>${esc(w.from)}</b> → <b>${esc(w.on)}</b> · requested in ${link(w.post, esc(w.post))} ${ago(w.since)} ago · ${detail}</li>`;
+    const active = w.state === 'open' || w.state === 'claimed';
+    return `<li class="wait-row is-${w.state}"><span class="wait-state">${label[w.state]}</span>${active ? ' ' : ' · '}${waitDirection(w, active)} · requested in ${link(w.post, esc(w.post))} ${ago(w.since)} ago · ${detail}</li>`;
   };
   return `<section class="thread-waits" aria-labelledby="threadWaitsHead"><h2 id="threadWaitsHead">Waits in this thread · ${ws.length}</h2><ul>${ws.map(row).join('')}</ul></section>`;
 }
-// Plain who-owes-whom sentences from outstanding waits (the wait board's rules).
-function owesPhrase(w) { return esc(w.from) + ' is waiting on ' + (w.on === state.human ? 'you' : esc(w.on)); }
+// Show the target first for active waits. Old requests describe their original roles.
+function waitParty(name) {
+  return name === state.human ? 'You (' + esc(name) + ')' : esc(name);
+}
+function waitDirection(w, active = true) {
+  const target = waitParty(w.on), requester = waitParty(w.from);
+  return active ? 'Next action: ' + target + ' · Requested by: ' + requester
+    : 'Requested from: ' + target + ' · Requested by: ' + requester;
+}
 function threadOwes(t) { return state.waiting.filter(w => w.thread === t.id); }
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const ago = (ts) => { const d = (Date.now() - Date.parse(ts))/1000; if (d<60) return `${d|0}s`; if (d<3600) return `${d/60|0}m`; if (d<86400) return `${d/3600|0}h`; return `${d/86400|0}d`; };
@@ -292,6 +326,7 @@ async function load(afterWrite = false) {
       const r = await fetch('/api/state');
       if (!r.ok) throw new Error('Board unavailable (' + r.status + '): ' + (await r.text()).slice(0,400));
       state = await r.json(); lastRefresh = Date.now(); refreshError = '';
+      if ($('#refreshResult').textContent) $('#refreshResult').textContent = '';
       if (!sel && state.threads[0]) sel = state.threads[0].id;
       render(); return true;
     } catch (e) {
@@ -316,13 +351,14 @@ function render() {
   const visible = (proj === 'all' ? state.threads : state.threads.filter(t => (t.project||'unscoped') === proj)).filter(t => showIdle || !t.idle).filter(t => !query || [t.title,t.project||'unscoped',...t.participants].join(' ').toLocaleLowerCase().includes(query));
   // Filtering changes results only; retain the selected conversation and draft.
   $('#results').textContent = 'All threads · ' + visible.length + ' matching' + (sel && !visible.some(t=>t.id===sel) ? ' · selected thread outside filters' : '');
-  $('#meta').textContent = `${visible.filter(t=>!t.closed&&!t.idle).length} open${visible.some(t=>t.idle)?`, ${visible.filter(t=>t.idle).length} idle`:''} · agents: ${agents} · server v${state.server?.version||'?'} up since ${state.server?.startedAt ? new Date(state.server.startedAt).toLocaleTimeString() : '?'}`;
+  const boardSummary = `${visible.filter(t=>!t.closed&&!t.idle).length} open${visible.some(t=>t.idle)?`, ${visible.filter(t=>t.idle).length} idle`:''} · agents: ${agents} · server v${state.server?.version||'?'} up since ${state.server?.startedAt ? new Date(state.server.startedAt).toLocaleTimeString() : '?'}`;
+  if ($('#meta').textContent !== boardSummary) $('#meta').textContent = boardSummary;
   const humanWaits = state.waiting.filter(w => w.on === state.human);
-  $('#attention').innerHTML = `<h2>Waiting on you <span class="count">· ${humanWaits.length}, all projects</span></h2>` + (humanWaits.length ? humanWaits.map(w => `<button type="button" class="attention-card" data-t="${esc(w.thread)}"><span class="t">${esc(w.title || w.thread)}</span><span class="ago">${ago(w.since)}</span><span class="owes">${owesPhrase(w)}</span><span class="m mono">${esc(w.project||'unscoped')}</span></button>`).join('') : `<p class="attention-empty">No active waits on ${esc(state.human)}.</p>`);
+  $('#attention').innerHTML = `<h2>Waiting on you <span class="count">· ${humanWaits.length}, all projects</span></h2>` + (humanWaits.length ? humanWaits.map(w => `<button type="button" class="attention-card" data-t="${esc(w.thread)}"><span class="t">${esc(w.title || w.thread)}</span><span class="ago">${ago(w.since)}</span><span class="owes">${waitDirection(w)}</span><span class="m mono">${esc(w.project||'unscoped')}</span></button>`).join('') : `<p class="attention-empty">No active waits on ${esc(state.human)}.</p>`);
   const stalledW = state.waiting.filter(w => w.stalled), stalledN = stalledW.length;
   const stalledProjects = [...new Set(stalledW.map(w => w.project==='global' ? `${w.on} in any project` : `${w.on} in ${w.project||'unscoped'}`))].join(', ');
   $('#waiting').innerHTML = state.waiting.length ? `<details class="waits" data-disclosure="waits" ${waitsOpen?'open':''}><summary>All waits · ${state.waiting.length} open, ${stalledN ? `<span class="stalled">${stalledN} stalled</span>` : 'none stalled'}</summary>` + (stalledN ? `<div class="stallnote">${stalledN} stalled: nobody has picked ${stalledN>1?'these':'this'} up for over ${esc(state.limits.stallHours)}h, the wait is still unclaimed: ${esc(stalledProjects)}. Check the relevant session or ask the owner.</div>` : '') + [...state.waiting].sort((a,b) => (b.stalled?1:0) - (a.stalled?1:0)).map(w =>
-    `<div class="wait${w.stalled?' is-stalled':''}"><span><span class="who">${w.stalled?`<span class="stalled" title="unclaimed for over ${esc(state.limits.stallHours)}h">stalled ${Math.floor(w.ageHours)}h</span> · `:''}${owesPhrase(w)}</span><span class="sub">${w.claimedBy?`claimed by <code>${esc(w.claimedBy)}</code>`:w.stalled?'stalled and unclaimed; check with the wait target':'unclaimed'} · ${ago(w.since)} ago · <span class="mono">${esc(w.project||'unscoped')}</span> · <a href="#" data-t="${esc(w.thread)}">${esc(w.title || w.thread)}</a></span></span><button class="ghost" data-unwait data-thread="${esc(w.thread)}" data-post="${esc(w.post)}" data-on="${esc(w.on)}" title="append a signed human cleanup event" aria-label="Clear wait: ${esc(w.from)} on ${esc(w.on)}">Clear</button></div>`).join('') + '</details>' : '<p class="attention-empty" style="margin:8px 0">No open waits.</p>';
+    `<div class="wait${w.stalled?' is-stalled':''}"><span><span class="who">${w.stalled?`<span class="stalled" title="unclaimed for over ${esc(state.limits.stallHours)}h">stalled ${Math.floor(w.ageHours)}h</span> · `:''}${waitDirection(w)}</span><span class="sub">${w.claimedBy?`claimed by <code>${esc(w.claimedBy)}</code>`:w.stalled?'stalled and unclaimed; check with the wait target':'unclaimed'} · ${ago(w.since)} ago · <span class="mono">${esc(w.project||'unscoped')}</span> · <a href="#" data-t="${esc(w.thread)}">${esc(w.title || w.thread)}</a></span></span><button class="ghost" data-unwait data-thread="${esc(w.thread)}" data-post="${esc(w.post)}" data-on="${esc(w.on)}" title="append a signed human cleanup event" aria-label="Clear wait: ${waitDirection(w)}">Clear</button></div>`).join('') + '</details>' : '<p class="attention-empty" style="margin:8px 0">No open waits.</p>';
   $('#waiting details')?.addEventListener('toggle', (e) => { waitsOpen = e.currentTarget.open; try { localStorage.setItem('iac.waiting.open', waitsOpen ? '1' : '0'); } catch {} });
   document.querySelectorAll('[data-unwait]').forEach(b => b.onclick = async (e) => {
     e.preventDefault(); e.stopPropagation();
@@ -332,17 +368,26 @@ function render() {
   });
   $('#threads').innerHTML = visible.map(t => { const owes = threadOwes(t); return `<li class="${t.id===sel?'sel':''}"><button type="button" class="thread-button" data-t="${esc(t.id)}" aria-current="${t.id===sel?'true':'false'}">
     <span class="t">${esc(t.title)}</span><span class="ago">${ago(t.lastActivity)}</span>
-    ${owes.length ? `<span class="owes${owes.some(w=>w.on===state.human)?' you':''}">${owes.map(owesPhrase).join('; ')}</span>` : ''}
+    ${owes.length ? `<span class="owes${owes.some(w=>w.on===state.human)?' you':''}">${owes.map(w => waitDirection(w)).join('; ')}</span>` : ''}
     <span class="m">${t.status !== 'open' ? `<span class="status ${t.status}">${t.status}</span> ` : ''}${proj==='all' ? `<span class="mono">${esc(t.project||'unscoped')}</span> · ` : ''}${t.posts.length} posts${t.verified?'':' · <span class="sig bad">✗ sig</span>'}</span></button></li>`; }).join('') || '<li class="empty">No matching threads. Change project or search, or show quiet threads.</li>';
   applyListState();
   document.querySelectorAll('[data-t]').forEach(el => el.onclick = (e) => { e.preventDefault(); saveDraft(); sel = el.dataset.t; composeOpen = false; renderedKey = null; listCollapsed = narrowView();
     render();
     jumpConversation(); });
   const t = state.threads.find(x => x.id === sel);
-  $('#view').innerHTML = composeOpen === 'new' ? composeNew() : t ? thread(t) : '<div class="empty">Select a thread.</div>';
+  const view = $('#view');
+  const reply = t && !composeOpen && !t.closed && renderedKey === t.id ? $('#view > .compose') : null;
+  const keepReply = reply && reply.dataset.replyAs === state.human;
+  if (keepReply) {
+    // Keep the same focused control and its accessibility object during refresh.
+    while (view.firstElementChild !== reply) view.firstElementChild.remove();
+    reply.insertAdjacentHTML('beforebegin', thread(t, false));
+  } else {
+    view.innerHTML = composeOpen === 'new' ? composeNew() : t ? thread(t) : '<div class="empty">Select a thread.</div>';
+  }
   renderedKey = composeOpen === 'new' ? newDraftKey : t?.id || null;
-  wire(t);
-  restoreDraft(renderedKey);
+  wire(t, keepReply);
+  if (!keepReply) restoreDraft(renderedKey);
   setComposerBusy(); setReady();
   document.querySelectorAll('details[data-disclosure]').forEach(el => { if (disclosures.has(el.dataset.disclosure)) el.open = disclosures.get(el.dataset.disclosure); });
   if (focusedKey && !focused.isConnected) {
@@ -353,7 +398,7 @@ function render() {
   }
 }
 const KIND_PHRASE = { question:'asked a question', answer:'answered', proposal:'proposed', objection:'objected', status:'posted a status', ack:'acknowledged', handoff:'handed off', resolution:'resolved' };
-function thread(t) {
+function thread(t, includeComposer = true) {
   const banners = [];
   if (t.locked) banners.push(`🔒 locked: ${esc(t.lockReason)}`);
   if (t.cooldown?.active) banners.push(`⏸ ping-pong: ${t.cooldown.authors.join(' & ')} are frozen until a third party or you posts. Escalate if it needs a decision.`);
@@ -361,7 +406,7 @@ function thread(t) {
   if (t.idle) banners.push(`idle since ${new Date(t.idleSince).toLocaleString()} · any post revives it`);
   if (t.closed) banners.push(`closed · will be deleted at ${new Date(t.expiresAt).toLocaleString()}`);
   const owes = threadOwes(t);
-  const owesLine = owes.length ? owes.map(w => `<strong>${owesPhrase(w)}.</strong> ${w.claimedBy ? `Claimed by <code>${esc(w.claimedBy)}</code>, not answered yet.` : w.stalled ? 'Stalled: nobody has claimed it.' : 'Nobody has claimed it yet.'}`).join('<br>') : '';
+  const owesLine = owes.length ? owes.map(w => `<strong>${waitDirection(w)}.</strong> ${w.claimedBy ? `Claimed by <code>${esc(w.claimedBy)}</code>, not answered yet.` : w.stalled ? 'Stalled: nobody has claimed it.' : 'Nobody has claimed it yet.'}`).join('<br>') : '';
   return `<div class="conv-head"><a href="#results" data-back-results>Back to thread results</a><div class="conv-head-inner"><div class="conv-title"><h1 class="title" id="conversationStart" tabindex="-1">${esc(t.title)}</h1>
   <div class="conv-meta"><span class="status ${t.status}">${t.status}</span><span class="mono">${esc(t.project||'unscoped')}</span><span aria-hidden="true">·</span><span>opened by ${esc(t.opener)} ${ago(t.created)} ago</span><span aria-hidden="true">·</span><span>${t.id}</span><span aria-hidden="true">·</span><span>expires ${new Date(t.expiresAt).toLocaleString()}</span></div>
   ${owesLine ? `<p class="owes-line">${owesLine}</p>` : ''}</div>
@@ -377,8 +422,8 @@ function thread(t) {
   ${waitTimeline(t)}
   <details class="verification" data-disclosure="signatures"><summary>About signatures and identity labels</summary><p>Each post says how its writer was identified: human, harness-attested (the agent's own session record named its model), launcher (IAC_AGENT) or self-declared (chosen at the command line). Labels describe identification, not who held the key. Signature checks use current registry keys. They do not prove who held a key, harness identity, or complete history. Waits in this thread lists every wait requested here and its state now, by the same rules as All waits, which shows only the outstanding ones. An ack means claimed, not answered.</p></details>
   </div>
-  ${t.closed ? '<p class="banner" style="margin:0 28px 20px">Closed thread · read-only.</p>' : `<div class="compose"><label class="field" for="body">Reply as ${esc(state.human)}<textarea id="body" placeholder="Write a reply. Use @name to mention someone."></textarea></label>
-    <div class="row"><button id="send">Send</button><label class="field" for="kind"><span aria-hidden="true">as</span><span class="sr-only">Message type</span><select id="kind">${['answer','question','proposal','objection','status','ack','handoff','resolution'].map(k=>`<option>${k}</option>`).join('')}</select></label><label class="field" for="wo">Then wait on (optional; comma-separated names)<input id="wo" placeholder="e.g. reviewer"></label></div>
+  ${!includeComposer ? '' : t.closed ? '<p class="banner" style="margin:0 28px 20px">Closed thread · read-only.</p>' : `<div class="compose" data-reply-as="${esc(state.human)}"><label class="field" for="body">Reply as ${esc(state.human)}<textarea id="body" placeholder="Write a reply. Use @name to mention someone."></textarea></label>
+    <div class="row"><button id="send">Send</button><label class="field" for="kind"><span aria-hidden="true">as</span><span class="sr-only">Message type</span><select id="kind">${['answer','question','proposal','objection','status','ack','handoff','resolution'].map(k=>`<option>${k}</option>`).join('')}</select></label><label class="field" for="wo">Ask for a response (optional; comma-separated names)<input id="wo" placeholder="e.g. reviewer"></label></div>
     <details data-disclosure="reply-options"><summary>Reply options</summary><label class="field" for="re">Reply to post ID (required for objection)<input id="re" placeholder="post id"></label></details>
     <p class="identity" style="margin:0">Viewer writes use the human identity ${esc(state.human)}.</p><div class="err" id="err" role="alert"></div></div>`}`;
 }
@@ -386,7 +431,7 @@ function composeNew() {
   return `<div class="conv-head"><a href="#results" data-back-results>Back to thread results</a><div class="conv-head-inner"><div class="conv-title"><h1 id="conversationStart" tabindex="-1">New thread</h1><p class="identity" style="margin:0">Acting as human: <strong>${esc(state.human)}</strong>.</p></div></div></div><div class="compose" style="margin-top:0;border-top:0">
    <label class="field" for="title">Thread title<input id="title" placeholder="title (≤ ${state.limits.titleMax} chars)"></label>
    <label class="field" for="body">Message (@name to mention)<textarea id="body" placeholder="What do you need? Use @name to mention someone."></textarea></label>
-   <div class="row"><label class="field" for="kind">Message type<select id="kind"><option>question</option><option>proposal</option><option>status</option><option>handoff</option></select></label><label class="field" for="wo">Waiting on (optional; comma-separated names)<input id="wo" placeholder="e.g. reviewer"></label><label class="field" for="project">Project<input id="project" placeholder="project" value="${esc(proj==='all'?'global':proj)}"></label></div>
+   <div class="row"><label class="field" for="kind">Message type<select id="kind"><option>question</option><option>proposal</option><option>status</option><option>handoff</option></select></label><label class="field" for="wo">Ask for a response (optional; comma-separated names)<input id="wo" placeholder="e.g. reviewer"></label><label class="field" for="project">Project<input id="project" placeholder="project" value="${esc(proj==='all'?'global':proj)}"></label></div>
    <div class="row"><button id="send">Open thread</button><button class="ghost" id="cancel">Cancel</button></div><div class="err" id="err" role="alert"></div></div>`;
 }
 
@@ -404,9 +449,9 @@ async function api(path, payload) {
   return j;
 }
 
-function wire(t) {
+function wire(t, keepReply) {
   const csv = (s) => s.split(',').map(x=>x.trim()).filter(Boolean);
-  $('#send')?.addEventListener('click', async () => {
+  if (!keepReply) $('#send')?.addEventListener('click', async () => {
     const submittedKey = renderedKey, submittedNew = composeOpen === 'new';
     if (!submittedKey || inFlight.has(submittedKey) || sendNeedsCheck.has(submittedKey)) return;
     const payload = submittedNew
@@ -415,6 +460,9 @@ function wire(t) {
     $('#err').textContent = '';
     saveDraft();
     inFlight.add(submittedKey); setComposerBusy();
+    // The empty live region remains exposed, including when the same result repeats.
+    $('#sendResult').textContent = '';
+    let outcome;
     try {
       const result = await api(submittedNew ? '/api/open' : '/api/post', payload);
       if (submittedNew) { createdThread = {id:result.thread,project:result.project,title:payload.title}; $('#createdTarget').hidden = false; $('#createdTarget').textContent = 'Open created thread ' + result.thread + ' (' + result.project + ')'; }
@@ -422,14 +470,17 @@ function wire(t) {
       if (submittedNew) newProjectDirty = false;
       // Clear only the composer that supplied this request. Navigation stays independent.
       if (renderedKey === submittedKey) {
-        renderedKey = null;
-        if (submittedNew) { composeOpen = false; sel = result.thread; }
-        render();
+        if (submittedNew) {
+          renderedKey = null; composeOpen = false; sel = result.thread; render();
+        } else if ($('#body')) {
+          for (const id of ['body','re','wo']) $('#' + id).value = '';
+          $('#kind').value = 'answer';
+          $('#err').textContent = '';
+        }
       }
-      $('#sendResult').textContent = submittedNew ? 'Opened “' + payload.title + '”: ' + result.thread + ' (' + result.project + '). Refreshing board…' : 'Post sent to ' + payload.thread + '. Refreshing board…';
       // load reports refresh failures separately: an accepted write is never retried.
       const refreshed = await load(true);
-      $('#sendResult').textContent = (submittedNew ? 'Opened “' + payload.title + '”: ' + result.thread + ' (' + result.project + ').' : 'Post sent to ' + payload.thread + '.') + (refreshed ? ' Board refreshed.' : ' Board refresh failed; the send succeeded. Do not resend.');
+      outcome = (submittedNew ? 'Opened “' + payload.title + '”: ' + result.thread + ' (' + result.project + ').' : 'Post sent to ' + payload.thread + '.') + (refreshed ? ' Board refreshed.' : ' Board refresh failed; the send succeeded. Do not resend.');
     } catch (e) {
       // The write may have landed and the server has no idempotency key, so hold this composer.
       if (!e.refused) sendNeedsCheck.set(submittedKey, ++holdGeneration);
@@ -437,13 +488,12 @@ function wire(t) {
       const draft = drafts.get(submittedKey);
       if (draft) draft.error = shown;
       if (renderedKey === submittedKey && $('#err')) $('#err').textContent = shown;
-      $('#sendResult').textContent = (e.refused ? 'Send refused for ' : 'Send unconfirmed for ') + (submittedNew ? 'new thread “' + payload.title + '”' : payload.thread) + ': ' + e.message + (e.refused ? '' : ' Sending is held until you check the conversation and use Refresh / retry.');
+      outcome = (e.refused ? 'Send refused for ' : 'Send unconfirmed for ') + (submittedNew ? 'new thread “' + payload.title + '”' : payload.thread) + ': ' + e.message + (e.refused ? '' : ' Sending is held until you check the conversation and use Refresh / retry.');
     } finally {
       inFlight.delete(submittedKey);
-      if (renderedKey === submittedKey) {
-        setComposerBusy();
-        if ($('#send')) $('#send').textContent = submittedNew ? 'Open thread' : 'Send';
-      }
+      if (renderedKey === submittedKey) setComposerBusy();
+      // Announce one settled outcome after refresh and composer updates.
+      $('#sendResult').textContent = outcome;
     }
   });
   $('#cancel')?.addEventListener('click', () => { if (!inFlight.has(newDraftKey)) { drafts.delete(newDraftKey); newProjectDirty = false; renderedKey = null; } composeOpen = false; render(); });
@@ -468,8 +518,13 @@ $('#gcBtn').onclick = async () => {
 };
 // Only a refresh the human asked for releases a hold: a timer poll proves nobody checked.
 $('#refreshBtn').onclick = async () => {
+  const status = $('#refreshResult');
+  status.textContent = '';
   const actionsChecked = new Map(actionNeedsCheck), sendsChecked = new Map(sendNeedsCheck);
-  if (!(await load(true))) return;
+  if (!(await load(true))) {
+    status.textContent = $('#meta').textContent;
+    return;
+  }
   // A write that became uncertain during this read is newer than the read, so it stays held.
   for (const [key,generation] of actionsChecked) if (actionNeedsCheck.get(key) === generation) actionNeedsCheck.delete(key);
   for (const [key,generation] of sendsChecked) {

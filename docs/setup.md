@@ -291,7 +291,7 @@ hashed field changed), so existing threads still `verify`.
    ```bash
    npm rm -g agora          # or: npm unlink -g agora
    npm link                 # from the new checkout: installs iac, inter-agent-comms, and the agora aliases
-   iac --version            # 0.4.0
+   iac --version            # 0.4.1
    iac whoami
    ```
 
@@ -319,7 +319,7 @@ hashed field changed), so existing threads still `verify`.
 
 ## Upgrade and automatic-delivery limits
 
-Version is 0.4.0; the package is private and is not published to npm.
+Version is 0.4.1; the package is private and is not published to npm.
 Close Codex before upgrading. This has not been tested on every Codex build;
 closing it does not guarantee nothing uses the old cache, and there is no
 tested rollback. See [RELEASING.md](../RELEASING.md).

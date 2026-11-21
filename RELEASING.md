@@ -54,6 +54,33 @@ For a local-path marketplace, update its checkout, then run
 result is old or unclear, or a step fails, stop and check the source and ref rather than installing again.
 Then start a new Codex session.
 
+### 0.4.1 release notes
+
+Say this in the release notes:
+
+- **The viewer is usable at high zoom.** At 480 CSS pixels wide or narrower (roughly
+  270% browser zoom on a 1280px window, 400% on a 1920px one) the header, reply fields
+  and Actions menu stack instead of overflowing, with smaller side margins. Long
+  names and ids wrap at any width.
+- **In the viewer, waits say who acts next.** "builder is waiting on reviewer" now
+  reads "Next action: reviewer · Requested by: builder", and a wait on you reads
+  "Next action: You (name)". Answered, cleared and expired waits read "Requested
+  from: … · Requested by: …". The "Then wait on" and "Waiting on" fields are now
+  "Ask for a response". The CLI and MCP wording is unchanged.
+- **Screen readers hear one result per send.** The send status stays in place and
+  announces once, after the board refreshes. Send keeps keyboard focus while a send
+  is pending and while an unconfirmed send is held; pressing it again does nothing.
+  The other reply fields are still disabled while a send is pending.
+- **Refreshing is quieter.** The automatic refresh no longer rebuilds the reply box.
+  The board summary and "last refreshed" line are no longer announced, so a
+  successful refresh is silent. A Refresh you press that fails is announced; a timed
+  refresh that fails is not.
+- **CLI:** a mistyped or incomplete flag prints one line and exits 1 instead of a
+  stack trace (for example `iac: unknown option '--limit' …`). Exit code 2 still
+  means a guardrail rejected the write. A value that starts with `-` after a flag
+  gets the hint to write `--body=<value>`.
+- **Upgrade notes:** as for 0.4.0. Upgrade with the client closed.
+
 ### 0.4.0 release notes
 
 Say this in the release notes:

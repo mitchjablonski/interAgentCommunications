@@ -165,7 +165,7 @@ test('CI concurrency source contract preserves accepted events, jobs and securit
   const source = workflow.replace(/^[ \t]*(?:#.*)?\n/gm, '').replace(/[ \t]+#.*$/gm, '');
   assert.match(source, /^name: ci$/m, 'stable workflow check name');
   const triggers = source.match(/^on:\n(?:  [^\n]*\n)+/gm);
-  assert.deepEqual(triggers, ['on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\n']);
+  assert.deepEqual(triggers, ['on:\n  push:\n    branches: [main]\n  pull_request:\n    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]\n  workflow_dispatch:\n']);
   const permissions = source.match(/^permissions:\n(?:  [^\n]*\n)+/gm);
   assert.deepEqual(permissions, ['permissions:\n  contents: read\n']);
   const blocks = source.match(/^concurrency:\n(?:  [^\n]*\n)+/gm);
@@ -180,7 +180,7 @@ test('CI private tooling stays gated and failure-propagating on both Node 24 OS 
   const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const jobsSource = workflow.slice(workflow.indexOf('\njobs:\n') + '\njobs:\n'.length);
   const jobs = [...jobsSource.matchAll(/^  ([a-z][a-z-]*):\n([\s\S]*?)(?=^  [a-z][a-z-]*:\n|$(?![\s\S]))/gm)];
-  assert.deepEqual(jobs.map(([, name]) => name), ['linux', 'private-scan', 'windows'], 'only duplicate tooling jobs removed');
+  assert.deepEqual(jobs.map(([, name]) => name), ['ci-gate', 'linux', 'private-scan', 'windows'], 'stable result gate plus existing coverage jobs');
   const privateStep = `      - name: Private tooling at Node 24
         if: github.event.repository.private
         run: bash private/ci.sh test
@@ -188,7 +188,8 @@ test('CI private tooling stays gated and failure-propagating on both Node 24 OS 
 `;
   for (const [osName, runner, versions] of [['linux', 'ubuntu-(?:latest|24\\.04)', ['20', '24']], ['windows', 'windows-latest', ['24']]]) {
     const body = jobs.find(([, name]) => name === osName)[2];
-    assert.doesNotMatch(body, /^    (?:if|permissions|continue-on-error):/m, 'OS jobs always run with workflow permissions');
+    assert.match(body, /^    if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.draft != true$/m, 'only draft PRs defer native jobs');
+    assert.doesNotMatch(body, /^    (?:permissions|continue-on-error):/m, 'OS jobs retain workflow permissions and fail on errors');
     // Step conditions: exactly one private-tooling guard; any other is the exact docs-only
     // test-suite gate (pinned by the docs-only test below), never anything broader.
     const conditions = body.match(/^      (?:- |  )if: .*$/gm) || [];
@@ -236,7 +237,7 @@ test('CI private tooling stays gated and failure-propagating on both Node 24 OS 
   }
 });
 
-test('CI skips only the test suites on docs-only PRs; privacy, archive, pack and private tooling always run', () => {
+test('CI ready docs-only PRs skip only test suites; privacy never defers and native packaging stays covered', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const jobsSource = workflow.slice(workflow.indexOf('\njobs:\n') + '\njobs:\n'.length);
   const jobs = Object.fromEntries([...jobsSource.matchAll(/^  ([a-z][a-z-]*):\n([\s\S]*?)(?=^  [a-z][a-z-]*:\n|$(?![\s\S]))/gm)].map(([, n, b]) => [n, b]));
@@ -256,6 +257,62 @@ test('CI skips only the test suites on docs-only PRs; privacy, archive, pack and
   assert.match(jobs.linux, /      - name: Export-ignored and local files are absent from the archive\n        run: \|/);
   assert.match(jobs.linux, /      - name: private\/ only in a private repository\n        env:/);
   assert.doesNotMatch(jobs['private-scan'], /scope|docs_only/, 'the privacy scan never skips');
+});
+
+test('CI draft routing requires fresh ready native qualification', () => {
+  const read = name => fs.readFileSync(new URL('../.github/workflows/' + name, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const ci = read('ci.yml');
+  for (const source of [ci]) {
+    assert.match(source, /types: \[opened, synchronize, reopened, ready_for_review, converted_to_draft, edited\]/);
+    assert.doesNotMatch(source, /pull_request_target:|continue-on-error:/);
+  }
+  const gate = ci.match(/^  ci-gate:\n([\s\S]*?)(?=^  linux:)/m)?.[1];
+  assert.ok(gate);
+  assert.ok(gate.includes('    needs: [linux, windows, private-scan]'));
+  assert.match(gate, /^    if: always\(\)$/m, 'gate evaluates after failed or skipped dependencies');
+  assert.ok(gate.includes("DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}"));
+  assert.ok(gate.includes('REPO_PRIVATE: ${{ github.event.repository.private }}'));
+  for (const [key, job] of [['LINUX_RESULT', 'linux'], ['WINDOWS_RESULT', 'windows'], ['SCAN_RESULT', 'private-scan']]) {
+    assert.ok(gate.includes(key + ': ${{ needs.' + job + '.result }}'));
+  }
+  const script = gate.slice(gate.indexOf('        run: |\n') + '        run: |\n'.length)
+    .split('\n').filter(line => line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+  assert.equal(script, [
+    'set -euo pipefail',
+    'if [ "$DRAFT" = true ]; then',
+    '  echo "Draft CI deferred; mark ready for review to run native qualification." >&2',
+    '  exit 1',
+    'fi',
+    'test "$LINUX_RESULT" = success',
+    'test "$WINDOWS_RESULT" = success',
+    'if [ "$REPO_PRIVATE" = true ]; then',
+    '  test "$SCAN_RESULT" = success',
+    'else',
+    '  test "$SCAN_RESULT" = skipped',
+    'fi',
+  ].join('\n'), 'complete failure-propagating gate script');
+  const qualifies = ({ draft = false, privateRepo = true, linux = 'success', windows = 'success', scan = 'success' } = {}) =>
+    !draft && linux === 'success' && windows === 'success' && scan === (privateRepo ? 'success' : 'skipped');
+  assert.equal(qualifies(), true);
+  assert.equal(qualifies({ draft: true, linux: 'skipped', windows: 'skipped' }), false, 'passing draft privacy never qualifies');
+  assert.equal(qualifies({ draft: true }), false, 'stale native success cannot qualify a draft');
+  for (const result of ['failure', 'cancelled', 'skipped', '']) {
+    for (const job of ['linux', 'windows', 'scan']) assert.equal(qualifies({ [job]: result }), false);
+  }
+  assert.equal(qualifies({ privateRepo: false, scan: 'skipped' }), true, 'public snapshot expects private scan skipped');
+  for (const scan of ['success', 'failure', 'cancelled', '']) assert.equal(qualifies({ privateRepo: false, scan }), false);
+  // Fixtures describe the pinned native contract, not GitHub scheduling.
+  const native = event => event.name !== 'pull_request' || event.draft !== true;
+  const draft = { name: 'pull_request', draft: true, sha: 'same-sha' };
+  for (const action of ['opened', 'synchronize', 'reopened', 'converted_to_draft', 'edited'])
+    assert.equal(native({ ...draft, action }), false);
+  assert.equal(native({ name: 'pull_request' }), true, 'missing metadata runs native coverage');
+  for (const action of ['ready_for_review', 'synchronize', 'reopened', 'edited']) {
+    const ready = { ...draft, draft: false, action };
+    assert.equal(native(ready), true);
+    assert.equal(ready.sha, draft.sha);
+  }
+  for (const name of ['push', 'workflow_dispatch']) assert.equal(native({ name }), true);
 });
 
 test('CI pins reviewed actions and gates privacy with optional personal terms', () => {
@@ -5076,7 +5133,7 @@ const runBin = (name, args, { env = {}, input } = {}) => spawnSync(process.execP
 
 test('package bins: iac and inter-agent-comms share one entry; agora, agora-mcp, agora-launch remain as aliases', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.4.0');
+  assert.equal(pkg.version, '0.4.1');
   assert.deepEqual(pkg.bin, {
     iac: 'bin/iac.js', 'inter-agent-comms': 'bin/iac.js', 'iac-mcp': 'bin/iac-mcp.js', 'iac-launch': 'bin/iac-launch.js',
     agora: 'bin/agora.js', 'agora-mcp': 'bin/agora-mcp.js', 'agora-launch': 'bin/agora-launch.js',
@@ -5094,7 +5151,7 @@ test('the agora alias runs the same CLI against the same store; a non-interactiv
     assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, new RegExp(thread)); assert.equal(r.stderr, '', `${name}: stderr is not a TTY, so no notice`);
   }
   assert.match(runBin('agora.js', ['--help']).stdout, /^iac \(inter-agent-comms\)/);
-  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.0\n', `${name} --version`);
+  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.1\n', `${name} --version`);
 });
 
 test('deprecation notice: interactive agora only, never in hook or MCP modes', async () => {
@@ -8292,4 +8349,23 @@ test('CI docs-only classifier fails closed: only grep status 1 skips the suites'
     assert.equal(run(code, code, 127), 'docs_only=false', 'a missing grep keeps the full suites');
     assert.equal(run(docs, 'README.md'), 'docs_only=false', 'a deletion or rename keeps the full suites');
   } finally { fs.rmSync(bin, { recursive: true, force: true }); }
+});
+
+test('an unknown or incomplete flag is a one-line error (exit 1, not the guardrail 2), not a stack trace', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-badflag-'));
+  try {
+    const env = { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, ...HARNESS_CLEAN, IAC_HOME: home };
+    for (const [args, re] of [
+      [['list', '--limit', '5'], /^iac: unknown option '--limit' \(a value starting with '-' goes after --\)\. See iac --help\.\n$/],
+      [['list', '--foo. bar'], /^iac: unknown option '--foo\. bar' /],
+      [['list', '--home'], /^iac: Option '--home <value>' argument missing\. See iac --help\.\n$/],
+      [['list', '--home', '--json'], /^iac: option '--home' needs a value; for one starting with '-', write --home=<value>\. See iac --help\.\n$/],
+      [['post', 't-x', '--body', '-1 on this'], /^iac: option '--body' needs a value; for one starting with '-', write --body=<value>\. See iac --help\.\n$/]]) {
+      const r = spawnSync(process.execPath, [binPath('iac.js'), ...args], { env, encoding: 'utf8', timeout: 20_000 });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, re);
+      assert.equal(r.stderr.split('\n').length, 2, 'exactly one line: ' + r.stderr);
+      assert.equal(r.stdout, '');
+    }
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });

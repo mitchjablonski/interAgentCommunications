@@ -499,7 +499,22 @@ export async function main(argv) {
     let o; try { o = parseArgs({ args: argv.filter((a) => !/^--hook(=|$)/.test(a)), options: OPTS, allowPositionals: true, strict: true }).values; } catch { return 0; }
     return hookBrief(o);
   }
-  const { values: o, positionals } = parseArgs({ args: argv, options: OPTS, allowPositionals: true, strict: true });
+  let parsed;
+  try { parsed = parseArgs({ args: argv, options: OPTS, allowPositionals: true, strict: true }); } catch (e) {
+    if (!String(e?.code).startsWith('ERR_PARSE_ARGS_')) throw e;
+    // A mistyped flag is an ordinary error (exit 1, like an unknown command): one line, no stack.
+    // Exit 2 stays reserved for guardrail rejections, which agents are told not to retry.
+    const msg = String(e.message);
+    const unknown = e.code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION' && /^Unknown option '(.*)'\. To specify/s.exec(msg);
+    // A value that starts with '-' (--body "-1 on this") reads as ambiguous; the fix is --body=<value>.
+    const ambiguous = !unknown && /^Option '(--[^' ]+)' argument is ambiguous/.exec(msg);
+    const line = unknown ? `unknown option '${unknown[1]}' (a value starting with '-' goes after --)`
+      : ambiguous ? `option '${ambiguous[1]}' needs a value; for one starting with '-', write ${ambiguous[1]}=<value>`
+      : msg.split('\n')[0].replace(/\.$/, '');
+    console.error(`iac: ${line}. See iac --help.`);
+    return 1;
+  }
+  const { values: o, positionals } = parsed;
   const [cmd, ...rest] = positionals;
   if (o.version && !cmd) { console.log(JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8')).version); return 0; }
   if (!cmd || o.help) { console.log(HELP); return 0; }

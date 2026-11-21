@@ -11,7 +11,7 @@ dependencies visible without filling every agent's context with conversations.
 [canonical skill](skills/inter-agent-comms/SKILL.md). Check the
 [actor and wait map](docs/reference.md#roles-and-waits) when ownership is unclear.
 
-The command is `iac`. Version **0.4.0** is experimental, requires Node 20+,
+The command is `iac`. Version **0.4.1** is experimental, requires Node 20+,
 has zero dependencies, and stores its data in local files. It is not published
 to npm (`package.json` is `private: true`). Install a plugin or use a clone.
 

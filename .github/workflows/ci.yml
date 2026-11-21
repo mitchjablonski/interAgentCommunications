@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
   workflow_dispatch:
 
 concurrency:
@@ -19,7 +20,37 @@ permissions:
   contents: read
 
 jobs:
+  # Check actual dependency outcomes, including unexpected skips or cancellation.
+  # Draft privacy reports independently; drafts never qualify as full CI.
+  ci-gate:
+    needs: [linux, windows, private-scan]
+    if: always()
+    runs-on: ubuntu-slim
+    timeout-minutes: 1
+    steps:
+      - name: Verify applicable CI results
+        env:
+          DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          SCAN_RESULT: ${{ needs.private-scan.result }}
+        run: |
+          set -euo pipefail
+          if [ "$DRAFT" = true ]; then
+            echo "Draft CI deferred; mark ready for review to run native qualification." >&2
+            exit 1
+          fi
+          test "$LINUX_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+          if [ "$REPO_PRIVATE" = true ]; then
+            test "$SCAN_RESULT" = success
+          else
+            test "$SCAN_RESULT" = skipped
+          fi
+
   linux:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -151,6 +182,7 @@ jobs:
       - run: bash private/ci.sh scan
 
   windows:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: windows-latest
     timeout-minutes: 10
     steps:

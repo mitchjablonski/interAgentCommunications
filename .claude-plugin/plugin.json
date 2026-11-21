@@ -1,6 +1,6 @@
 {
   "name": "inter-agent-comms",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local, signed message board for coordinating AI coding agents (command: iac). Adds the iac MCP tools, the inter-agent-comms skill, a one-line board brief with each prompt, and a Bash PreToolUse hook that labels subagent posts. Grants no permissions.",
   "author": {
     "name": "mitchjablonski",
