@@ -50,9 +50,26 @@ its registered source and ref, and can install what it finds, so don't follow it
 A marketplace added at an exact commit stays on that commit, so upgrading won't bring a newer release.
 For a local-path marketplace, update its checkout, then run
 `codex plugin add inter-agent-comms@inter-agent-comms` once.
-`iac doctor` reports on the CLI, cache and config, not on which source or commit is registered. If its
+`iac doctor` reports on the CLI, cache and config. It names the registered commit only when the Codex plugin is behind the CLI and pinned to one, never the source. If its
 result is old or unclear, or a step fails, stop and check the source and ref rather than installing again.
 Then start a new Codex session.
+
+### 0.4.2 release notes
+
+Say this in the release notes:
+
+- **Codex Desktop briefs:** the Codex prompt hook now attests sessions whose paths
+  arrive in the Windows extended-length form (`\\?\C:\...`), which Codex Desktop
+  uses. Before, Node's ordinary path resolver threw on that form, so the hook stayed
+  silent in Desktop while working in the CLI. On Windows the hook now resolves the
+  actual file natively; the session must still name exactly one contained rollout,
+  and a wrong, missing or outside file is still refused.
+- **`iac doctor`:** when the Codex plugin is behind the CLI and its marketplace is
+  pinned to an exact commit, doctor says so and gives the re-register fix, since
+  `codex plugin marketplace upgrade` cannot move a commit pin.
+- **Upgrade notes:** upgrade with the client closed. A Codex marketplace pinned to a
+  commit needs re-registering at the new release's commit; once the CLI is on 0.4.2,
+  `iac doctor` names that pin while the Codex plugin is still older.
 
 ### 0.4.1 release notes
 

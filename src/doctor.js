@@ -454,6 +454,18 @@ function tomlString(q) {
   if (q.startsWith("'")) return q.slice(1, -1);
   try { return JSON.parse(q); } catch { return q.slice(1, -1); }
 }
+/**
+ * The commit a git `[marketplaces.inter-agent-comms]` table is pinned to, shortened, or null.
+ * Only an exact 40-hex commit is a pin: a branch or tag ref still moves on `marketplace upgrade`,
+ * and a local-path marketplace is updated through its checkout. Nothing else is ever printed.
+ */
+function marketplacePin(toml) {
+  const t = tomlTable(toml, 'marketplaces.inter-agent-comms');
+  if (t == null || /^\s*source_type\s*=\s*["']local["']/m.test(t)) return null;
+  const m = t.match(/^\s*ref\s*=\s*('[^'\n]*'|"(?:[^"\\\n]|\\.)*")/m);
+  const ref = m ? tomlString(m[1]) : '';
+  return /^[0-9a-f]{40}$/i.test(ref) ? ref.slice(0, 12) : null;
+}
 /** IAC_HOME / AGORA_HOME baked into a [mcp_servers.<name>] table, as { name, key, value }. */
 function mcpStoreEnv(toml, name) {
   const out = [];
@@ -509,8 +521,15 @@ function codexInstallChecks(add, { root, suffix, version, cliRoot, inCodex, stor
     if (!isFile(path.join(dir, 'bin', 'iac.js'))) add(id, 'fail', `plugin ${v} at ${dir} has no bin/iac.js: its hook cannot run`, `codex plugin add ${PLUGIN_ID} again`);
     else if (!enabled) add(id, 'warn', `plugin ${v} is cached under ${root} but not enabled in config.toml${legacyNote}`, [table(PLUGIN_ID) == null ? `codex plugin add ${PLUGIN_ID}` : `set enabled = true under [plugins."${PLUGIN_ID}"]`, legacyFix].filter(Boolean).join('; '));
     else if (v === version || samePath(dir, cliRoot)) add(id, legacyOn ? 'warn' : 'ok', `plugin ${v}, same as the CLI${where}${legacyNote}`, legacyFix);
-    else add(id, 'warn', `plugin ${v} but CLI ${version}${where}${legacyNote}`,
-      [cmpVer(v, version) < 0 ? `close Codex; unless the marketplace is pinned to an older commit, run codex plugin marketplace upgrade inter-agent-comms once (a local-path marketplace: update its checkout, then codex plugin add ${PLUGIN_ID} once); then check /hooks in a new session` : `upgrade the CLI from the plugin copy: npm install -g ${dir}`, legacyFix].filter(Boolean).join('; '));
+    else {
+      // A git marketplace pinned to a commit stays on it: `marketplace upgrade` cannot move it.
+      const pin = cmpVer(v, version) < 0 ? marketplacePin(toml) : null;
+      const older = pin
+        ? `close Codex; re-register the inter-agent-comms marketplace pinned to the new release's commit (codex plugin marketplace remove inter-agent-comms, then add it again at that commit; see codex plugin marketplace add --help), then codex plugin add ${PLUGIN_ID} once; then check /hooks in a new session`
+        : `close Codex; unless the marketplace is pinned to an older commit, run codex plugin marketplace upgrade inter-agent-comms once (a local-path marketplace: update its checkout, then codex plugin add ${PLUGIN_ID} once); then check /hooks in a new session`;
+      add(id, 'warn', `plugin ${v} but CLI ${version}${where}${pin ? `; its marketplace is pinned to commit ${pin}, so marketplace upgrade will not move it` : ''}${legacyNote}`,
+        [cmpVer(v, version) < 0 ? older : `upgrade the CLI from the plugin copy: npm install -g ${dir}`, legacyFix].filter(Boolean).join('; '));
+    }
   }
 
   // an IAC_HOME baked into a Codex MCP table that names another store: agents on different boards

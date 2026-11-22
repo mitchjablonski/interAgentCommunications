@@ -39,9 +39,19 @@ export function codexRoot(env = process.env) {
   return codexHomeIsAbsolute(env.CODEX_HOME) ? env.CODEX_HOME : null;
 }
 
+/**
+ * realpath for attestation. On Windows, Codex Desktop hands paths over in the verbatim
+ * extended-length form (`\\?\C:\...`), on which fs.realpathSync throws (EISDIR, files and
+ * directories alike) and which must not be reinterpreted with ordinary path rules. The native
+ * resolver resolves the actual file for both spellings and returns its canonical path and case
+ * (it also expands 8.3 short names, so every compared path goes through this one resolver).
+ */
+const nativeRealpath = fs.realpathSync.native; // captured once: later wrappers of fs.realpathSync carry no .native
+const realpath = (p) => (process.platform === 'win32' ? nativeRealpath(p) : fs.realpathSync(p));
+
 function containedFile(file, root) {
   try {
-    const base = fs.realpathSync(root); const real = fs.realpathSync(file); const rel = path.relative(base, real);
+    const base = realpath(root); const real = realpath(file); const rel = path.relative(base, real);
     return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel) && fs.statSync(real).isFile() ? real : null;
   } catch { return null; }
 }
@@ -124,7 +134,7 @@ export function codexHookSessionDetail(payload, env = process.env) {
   const home = codexRoot(clean); if (!home) return { reason: 'no-codex-home' };
   const found = findRolloutDetail(path.join(home, 'sessions'), session);
   if (!found.path) return { reason: found.reason };
-  let real; try { real = fs.realpathSync(transcript); } catch { return { reason: 'transcript-unresolvable' }; }
+  let real; try { real = realpath(transcript); } catch { return { reason: 'transcript-unresolvable' }; }
   return real === found.path ? { session } : { reason: 'transcript-mismatch' };
 }
 

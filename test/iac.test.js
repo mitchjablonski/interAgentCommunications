@@ -150,13 +150,42 @@ test('Codex discovery: exact directory budget accepts a complete search and refu
   try {
     for (let i = 0; i < 9999; i++) fs.mkdirSync(path.join(sessions, `dir-${String(i).padStart(5, '0')}`));
     assert.deepEqual(codexHookSessionDetail(input, env), { session: id });
-    assert.equal(codexHookSession(input, env), id); assert.equal(codexRolloutPath(id, env), fs.realpathSync(file));
+    assert.equal(codexHookSession(input, env), id); assert.equal(codexRolloutPath(id, env), (process.platform === 'win32' ? fs.realpathSync.native : fs.realpathSync)(file));
     fs.mkdirSync(path.join(sessions, 'dir-09999'));
     for (const present of [true, false]) {
       if (!present) fs.unlinkSync(file);
       assert.deepEqual(codexHookSessionDetail(input, env), { reason: 'rollout-ambiguous' });
       assert.equal(codexHookSession(input, env), null); assert.equal(codexRolloutPath(id, env), null);
     }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Codex attestation accepts Windows extended-length paths (Codex Desktop hands them over)', { skip: process.platform !== 'win32' && 'Windows path namespace' }, async () => {
+  const { codexHookSessionDetail, codexRoot } = await import('../src/codex-hook.js');
+  // On Windows, fs.realpathSync throws on a \\?\ path; attestation resolves the actual file instead.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-longpath-'));
+  try {
+    const sessions = path.join(root, 'sessions'); fs.mkdirSync(sessions);
+    const id = 'longpath-fixture'; const file = path.join(sessions, `rollout-2026-01-01-${id}.jsonl`);
+    fs.writeFileSync(file, `${JSON.stringify({ type: 'session_meta', payload: { id } })}\n`);
+    const long = (p) => '\\\\?\\' + path.resolve(p);
+    const ok = { session: id };
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: file }, { CODEX_HOME: root }), ok, 'plain paths');
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: long(file) }, { CODEX_HOME: root }), ok, 'prefixed transcript_path');
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: file }, { CODEX_HOME: long(root) }), ok, 'prefixed CODEX_HOME');
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: long(file) }, { CODEX_HOME: long(root) }), ok, 'both prefixed');
+    assert.equal(codexRoot({ CODEX_HOME: long(root) }), long(root), 'CODEX_HOME is kept as given');
+    const lower = (p) => p.replace(/^([A-Za-z]):/, (m, d) => d.toLowerCase() + ':');
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: '\\\\?\\' + lower(path.resolve(file)) }, { CODEX_HOME: root }), ok, 'a lowercase drive resolves to the same file');
+    // still refused: another session's rollout, a copy outside sessions, a missing file, and a literal .. in a verbatim path
+    const otherId = 'longpath-other'; const other = path.join(sessions, `rollout-2026-01-01-${otherId}.jsonl`);
+    fs.writeFileSync(other, `${JSON.stringify({ type: 'session_meta', payload: { id: otherId } })}\n`);
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: long(other) }, { CODEX_HOME: root }), { reason: 'transcript-mismatch' }, 'wrong file');
+    const outside = path.join(root, `rollout-2026-01-01-${id}.jsonl`); fs.copyFileSync(file, outside);
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: long(outside) }, { CODEX_HOME: root }), { reason: 'transcript-mismatch' }, 'outside sessions');
+    assert.deepEqual(codexHookSessionDetail({ session_id: id, transcript_path: long(path.join(sessions, 'missing.jsonl')) }, { CODEX_HOME: root }), { reason: 'transcript-unresolvable' }, 'missing file');
+    const dotdot = long(sessions) + '\\x\\..\\..\\' + path.basename(outside);
+    assert.notDeepEqual(codexHookSessionDetail({ session_id: id, transcript_path: dotdot }, { CODEX_HOME: root }), ok, 'a literal .. never attests');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -5133,7 +5162,7 @@ const runBin = (name, args, { env = {}, input } = {}) => spawnSync(process.execP
 
 test('package bins: iac and inter-agent-comms share one entry; agora, agora-mcp, agora-launch remain as aliases', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.4.1');
+  assert.equal(pkg.version, '0.4.2');
   assert.deepEqual(pkg.bin, {
     iac: 'bin/iac.js', 'inter-agent-comms': 'bin/iac.js', 'iac-mcp': 'bin/iac-mcp.js', 'iac-launch': 'bin/iac-launch.js',
     agora: 'bin/agora.js', 'agora-mcp': 'bin/agora-mcp.js', 'agora-launch': 'bin/agora-launch.js',
@@ -5151,7 +5180,7 @@ test('the agora alias runs the same CLI against the same store; a non-interactiv
     assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, new RegExp(thread)); assert.equal(r.stderr, '', `${name}: stderr is not a TTY, so no notice`);
   }
   assert.match(runBin('agora.js', ['--help']).stdout, /^iac \(inter-agent-comms\)/);
-  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.1\n', `${name} --version`);
+  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.2\n', `${name} --version`);
 });
 
 test('deprecation notice: interactive agora only, never in hook or MCP modes', async () => {
@@ -6363,6 +6392,25 @@ test('doctor: plugin versions against the CLI, stale gated hooks, duplicate hook
   assert.equal(pc.status, 'warn'); assert.match(pc.message, new RegExp(`plugin 0\\.2\\.9 \\(user scope\\) but CLI ${PKG_VERSION.replace(/\./g, '\\.')}`)); assert.match(pc.message, /agora@agora/);
   assert.match(pc.fix, /\/plugin marketplace update inter-agent-comms, then \/plugin update inter-agent-comms@inter-agent-comms/); assert.match(pc.fix, /\/plugin uninstall agora@agora/);
   assert.equal(check(r, 'plugin-codex').status, 'warn'); assert.match(check(r, 'plugin-codex').message, /plugin 0\.2\.9 but CLI/);
+  assert.match(check(r, 'plugin-codex').fix, /unless the marketplace is pinned/); assert.doesNotMatch(check(r, 'plugin-codex').message, /pinned to/);
+  {
+    // A git marketplace pinned to a commit: marketplace upgrade cannot move it, so say so and how to re-pin.
+    const cfg = path.join(codex, 'config.toml'), orig = fs.readFileSync(cfg, 'utf8');
+    const withTable = async (body) => { fs.writeFileSync(cfg, orig + '\n[marketplaces.inter-agent-comms]\n' + body); return check(await runDoctor({ home, env }), 'plugin-codex'); };
+    const hedged = (c, why) => { assert.doesNotMatch(c.message, /pinned/, why); assert.match(c.fix, /unless the marketplace is pinned/, why); };
+    try {
+      const pinned = await withTable('source_type = "git"\nsource = "https://x.invalid/repo.git"\nref = "d7d1454c51d2cb398fe429ba116a1977ef50567b"\n');
+      assert.match(pinned.message, /marketplace is pinned to commit d7d1454c51d2, so marketplace upgrade will not move it/);
+      assert.match(pinned.fix, /re-register the inter-agent-comms marketplace pinned to the new release's commit/); assert.doesNotMatch(pinned.fix, /marketplace upgrade/);
+      assert.doesNotMatch(pinned.message, /x\.invalid/, 'the source URL is never printed');
+      // single quotes, a trailing comment and CRLF are read the same way
+      assert.match((await withTable("source_type = 'git'\r\nref = 'D7D1454C51D2CB398FE429BA116A1977EF50567B' # pinned\r\n")).message, /pinned to commit D7D1454C51D2/);
+      hedged(await withTable('source_type = "git"\nref = "main"\n'), 'a branch ref still moves on upgrade');
+      hedged(await withTable('ref = "ghp_notarealtokenbutlooksone0000000000"\n'), 'a non-commit value is never printed');
+      hedged(await withTable('source_type = "local"\nref = "d7d1454c51d2cb398fe429ba116a1977ef50567b"\n'), 'a local-path marketplace keeps the checkout advice');
+      hedged(await withTable('source_type = "git"\n\n[marketplaces.inter-agent-comms.extra]\nref = "d7d1454c51d2cb398fe429ba116a1977ef50567b"\n'), 'a ref in a nested table is not the pin');
+    } finally { fs.writeFileSync(cfg, orig); }
+  }
   const hc = check(r, 'hooks-claude');
   assert.equal(hc.status, 'warn'); assert.match(hc.message, /^likely active: plugin hook/); assert.match(hc.message, /gated on IAC_AGENT\/AGORA_AGENT .*inert/);
   assertNoHookDeletion(hc);
@@ -7689,11 +7737,11 @@ test('repair: rejects source changes and symlinks without replacing their target
  * made before the guards read selectively (whole-board waitingBoard for the ack claim, threads() derived up front and
  * handed to the guard as an array). Returns the outcome the way the test compares it.
  */
-async function decisionBefore71(a, op, args) {
+async function decisionBefore71(a, op, args, reference) {
   const { checkPost, checkOpen } = await import('../src/rules.js');
   const { resolveInstance } = await import('../src/api.js');
   const { detectProject } = await import('../src/project.js');
-  a.store.invalidate();
+  if (!reference) a.store.invalidate();
   try {
     const cfg = a.config(); const reg = a.registry(); const role = reg[args.as]?.role || 'agent';
     if (op === 'open') {
@@ -7703,22 +7751,44 @@ async function decisionBefore71(a, op, args) {
       if (!/^[A-Za-z0-9][\w.\-\/:]{0,119}$/.test(proj)) throw new Rejected('bad-project', 'bad project');
       const ms = a._mentions(args.body, [...(args.mentions || []), ...(args.waitingOn || [])], args.as);
       const wo = (args.waitingOn || []).map((w) => reg[w.toLowerCase()] ? w.toLowerCase() : w);
-      const allStates = a.threads();
+      const allStates = reference ? reference.states : a.threads();
       checkOpen({ allStates, author: args.as, instance: inst, role, kind: args.kind, title: args.title, body: args.body, mentions: ms, waitingOn: wo, project: proj, now: a.now(), config: cfg, registry: reg });
       return 'ok';
     }
     const ms = a._mentions(args.body, [...(args.mentions || []), ...(args.waitingOn || [])], args.as);
-    const state = a.thread(args.thread);
+    const state = reference ? reference.states.find((s) => s.id === args.thread) : a.thread(args.thread);
     if (!state) throw new Error(`no such thread: ${args.thread}`);
     if (state.status === 'damaged') throw new Rejected('damaged', 'damaged');
     a._assertNotImpersonating(args.as); a._assertNoInstanceOverride(args.instance, 'posting');
     const inst = resolveInstance({ explicit: args.instance, agent: args.as, project: state.project, env: a.env, session: null });
-    const claimed = a.waitingBoard({ on: args.as, project: state.project }).find((w) => w.thread === args.thread);
+    const waits = reference ? reference.waitingBoard(args.as, state.project) : a.waitingBoard({ on: args.as, project: state.project });
+    const claimed = waits.find((w) => w.thread === args.thread);
     if (args.kind === 'ack' && claimed?.claimedBy && claimed.claimedBy !== inst) throw new Rejected('claimed', 'claimed');
-    const allStates = a.threads();
+    const allStates = reference ? reference.states : a.threads();
     checkPost({ state, allStates, author: args.as, instance: inst, role, kind: args.kind, body: args.body, mentions: ms, re: args.re, now: a.now(), config: cfg, registry: reg, bypass: !!args.bypass });
     return 'ok';
   } catch (e) { return e?.rejected ? `rejected:${e.code}` : `error:${e?.message}`; }
+}
+
+// Reuse derived answers only for this test's immutable boards. The live Agora methods
+// retain their original sorting and closed/idle/project filters; no methods are replaced.
+function immutableReference71(board) {
+  const oracle = new Agora(board.home, { now: () => board.now, env: { IAC_PROJECT: 'test/suite' } });
+  const freeze = (value) => {
+    if (value && typeof value === 'object') {
+      for (const child of Object.values(value)) freeze(child);
+      Object.freeze(value);
+    }
+    return value;
+  };
+  const states = freeze(oracle.threads());
+  const waits = new Map();
+  const waitingBoard = (on, project) => {
+    const key = JSON.stringify([on, project]);
+    if (!waits.has(key)) waits.set(key, freeze(oracle.waitingBoard({ on, project })));
+    return waits.get(key);
+  };
+  return { oracle, states, waitingBoard };
 }
 
 /** A seeded random board: live and expired threads, waits and clears (some forged), ping-pong, rate-limit edges, damage. */
@@ -7790,6 +7860,8 @@ test('post and open guard decisions match the whole-board derivation on random b
     const ids = await fillBoard(board);
     const { a, rnd, pick } = board;
     const people = ['fable', 'opus', 'sol', 'astra', 'ada'];
+    const reference = immutableReference71(board);
+    const initialFiles = new Map(fs.readdirSync(a.store.threadsDir).map((name) => [name, fs.readFileSync(path.join(a.store.threadsDir, name))]));
     // claim and unwait candidates: this thread's waits, exactly the ones the whole board lists for it
     for (const { id } of ids) {
       const s = a.thread(id);
@@ -7810,18 +7882,23 @@ test('post and open guard decisions match the whole-board derivation on random b
       let op = 'post';
       if (rnd() < 0.25) { op = 'open'; Object.assign(args, { title: pick(['t', '']), project: pick(['test/suite', 'test/other']), kind: pick(['status', 'question', 'proposal', 'ack']) }); }
       else { args.thread = rnd() < 0.03 ? 't-ffffff00' : target.id; args.bypass = rnd() < 0.1; }
-      const before = await decisionBefore71(a, op, args);
+      const before = await decisionBefore71(reference.oracle, op, args, reference);
+      a.store.invalidate(); // Every real dry-run still starts with a cold production store.
       let after;
       try { await a[op]({ ...args, dryRun: true }); after = 'ok'; } catch (e) { after = e?.rejected ? `rejected:${e.code}` : `error:${e?.message}`; }
       assert.equal(after, before, `seed ${seed} attempt ${k}: ${op} ${JSON.stringify(args)}`);
       seen[after] = (seen[after] || 0) + 1; attempts++;
+    }
+    assert.deepEqual(fs.readdirSync(a.store.threadsDir).sort(), [...initialFiles.keys()].sort());
+    for (const [name, bytes] of initialFiles) {
+      assert.deepEqual(fs.readFileSync(path.join(a.store.threadsDir, name)), bytes, 'dry-run changed board');
     }
     fs.rmSync(board.home, { recursive: true, force: true });
   }
   // the boards must actually reach the board-wide and per-thread guards, not only the cheap refusals
   for (const code of ['ok', 'rejected:global-rate', 'rejected:open-cap', 'rejected:claimed', 'rejected:double-post', 'rejected:damaged', 'rejected:closed'])
     assert.ok(seen[code] > 0, `no attempt ended ${code}: ${JSON.stringify(seen)}`);
-  assert.ok(attempts >= 1000);
+  assert.equal(attempts, 1200);
 });
 
 test('a post reads the board only when the family rate check can be reached', async () => {

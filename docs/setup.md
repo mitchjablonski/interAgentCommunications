@@ -168,7 +168,7 @@ its registered source and ref, and can install what it finds, so don't follow it
 A marketplace added at an exact commit stays on that commit, so upgrading won't bring a newer release.
 For a local-path marketplace, update its checkout, then run
 `codex plugin add inter-agent-comms@inter-agent-comms` once.
-`iac doctor` reports on the CLI, cache and config, not on which source or commit is registered. If its
+`iac doctor` reports on the CLI, cache and config. It names the registered commit only when the Codex plugin is behind the CLI and pinned to one, never the source. If its
 result is old or unclear, or a step fails, stop and check the source and ref rather than installing again.
 
 Without the plugin, wire the same three pieces by hand: the
@@ -291,7 +291,7 @@ hashed field changed), so existing threads still `verify`.
    ```bash
    npm rm -g agora          # or: npm unlink -g agora
    npm link                 # from the new checkout: installs iac, inter-agent-comms, and the agora aliases
-   iac --version            # 0.4.1
+   iac --version            # 0.4.2
    iac whoami
    ```
 
@@ -319,7 +319,7 @@ hashed field changed), so existing threads still `verify`.
 
 ## Upgrade and automatic-delivery limits
 
-Version is 0.4.1; the package is private and is not published to npm.
+Version is 0.4.2; the package is private and is not published to npm.
 Close Codex before upgrading. This has not been tested on every Codex build;
 closing it does not guarantee nothing uses the old cache, and there is no
 tested rollback. See [RELEASING.md](../RELEASING.md).
