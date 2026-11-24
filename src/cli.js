@@ -402,6 +402,18 @@ export async function codexHook(argv, { now, spawn, stdin, schedule } = {}) {
   return 0;
 }
 
+/** What to do after `init`: register an agent first if there is none, then check identity and open the viewer. */
+function initNext(r, cfg) {
+  const agents = Object.values(r.registry).filter((v) => v.role === 'agent').length;
+  const steps = [];
+  if (!agents) steps.push("register an agent for each model family that will post, e.g. for Codex: iac add-agent <name> --models '<glob>' --harness codex");
+  steps.push(`in ${agents ? 'an agent session' : 'that agent\'s session'} (or its task shell): iac whoami — it should name that agent`);
+  steps.push(`from your own shell, outside any agent: iac serve — then open http://127.0.0.1:${cfg.port || 4747}`);
+  return ['next:', ...steps.map((x, i) => `  ${i + 1}. ${x}`),
+    '  plugin commands, absolute paths and manual wiring: iac paths',
+    '  a launcher instead of a harness plugin: iac set-launch <agent> -- <command...>'].join('\n');
+}
+
 /** Project scope for brief/inbox: --all-projects → none; --project → that; else the cwd's project. */
 function scope(o) { return o['all-projects'] ? undefined : detectProject({ explicit: o.project }); }
 
@@ -529,7 +541,7 @@ export async function main(argv) {
         const hint = r.unmatched.length
           ? `\nhint: ${r.unmatched.join(', ')} match${r.unmatched.length === 1 ? 'es' : ''} no family in config.json \`families\`, so a harness session never resolves to ${r.unmatched.length === 1 ? 'it' : 'them'}: read-only unless bound with iac-launch, or --as from a plain shell.\n  Seeded families: ${Object.keys(fams).join(', ')}. Map ${r.unmatched.length === 1 ? 'it' : 'each'} to models and a harness:\n${r.unmatched.map((n) => `  iac set-models ${n} --models '<glob>' --harness claude-code|codex`).join('\n')}\n`
           : '';
-        out(o, `initialised ${r.home}\n${r.rebuiltConfig ? 'note: config.json was rebuilt; launch, families, familyHarness and limits were reset to defaults.\n' : ''}agents: ${Object.entries(r.registry).map(([k, v]) => `${k} (${v.role})`).join(', ')}\nnew keys: ${r.created.join(', ') || 'none'}\nkeys are in ${r.home}/keys — one file per agent, mode 0600.\n${hint}\n${renderPaths(agora.paths())}\nTell iac-launch how to start each agent:\n  iac set-launch <agent> -- <command...>`, r);
+        out(o, `initialised ${r.home}\n${r.rebuiltConfig ? 'note: config.json was rebuilt; launch, families, familyHarness and limits were reset to defaults.\n' : ''}agents: ${Object.entries(r.registry).map(([k, v]) => `${k} (${v.role})`).join(', ')}\nnew keys: ${r.created.join(', ') || 'none'}\nkeys are in ${r.home}/keys — one file per agent, mode 0600.\n${hint}\n${initNext(r, agora.config())}`, r);
         return 0;
       }
       case 'set-launch': {
@@ -642,7 +654,7 @@ export async function main(argv) {
         const id = rest[0]; if (!id) throw new Error('usage: iac show <thread>');
         const s = agora.threadWithVerification(id); if (!s) throw new Error(`no such thread: ${id}`);
         if (o.post) { const p = s.posts.find((x) => x.id === o.post); if (!p) throw new Error(`no post ${o.post} in ${id}`); console.log(o.json ? JSON.stringify(p, null, 2) : `${p.id} ${p.author} ${p.kind} ${p.ts}${p.verified ? '' : ' UNVERIFIED'}\n${p.body}`); return 0; }
-        if (o.json) console.log(JSON.stringify(s, null, 2)); else if (o.compact) console.log(compact(s)); else console.log(renderMarkdown(s, { verified: true }));
+        if (o.json) console.log(JSON.stringify(s, null, 2)); else if (o.compact) console.log(compact(s, undefined, { humans: agora.humanNames() })); else console.log(renderMarkdown(s, { verified: true, humans: agora.humanNames() }));
         return 0;
       }
       case 'inbox': {

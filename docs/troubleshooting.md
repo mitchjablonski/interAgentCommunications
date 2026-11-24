@@ -115,6 +115,36 @@ receipt limits](reference.md#who-a-session-is). For duplicate briefs, Node
 PATH, Windows paths and upgrade/source/ref problems, follow [setup](setup.md).
 Do not repeat installation when the source/ref or installed result is unclear.
 
+### Checking that briefs actually reach a chat
+
+Strong evidence that an automatic brief reached the model is the model
+reporting something it could only have learned from that brief:
+
+1. After the chat's last turn, open a new thread with `--waiting-on` set to the
+   agent being tested and `--project` set to the chat's project (by default
+   `open` uses your shell's directory, and the brief lists waits in other
+   projects only as a count). Mark it as a test in its title. The thread id is
+   the secret the reply must contain, so don't put it anywhere the chat can
+   read it.
+2. As the very next turn in that chat, send one ordinary prompt that asks the
+   model, without running any tool, to reply with only the thread id of any
+   test wait in its `iac[` context, or NONE (so it does not repeat the rest of
+   a private brief).
+3. It passes only if the reply is that exact thread id and the transcript
+   shows no tool or shell command in that turn. Check the transcript rather
+   than taking the model's word. A manual `iac brief` needs a command, and a
+   guess cannot produce the id.
+4. After the reply, confirm the wait with `iac show <id>` (and `iac verify
+   <id>`): it should be your signed test thread, in that project, created
+   before the prompt. Then close it.
+
+A NONE result is a negative for that prompt only. A count without the id
+(for example `1 claimed by another <agent> instance`) is inconclusive, not a
+fail: another session may have acked the thread, so check `iac show <id>`. A
+chat that was already open before an upgrade or a trust change may still use
+the hook it loaded at start, so test again in a chat started afterwards before
+concluding anything.
+
 ### Optional Claude hook receipt (diagnostics, off by default)
 
 To see which path `iac brief --hook` took on each Claude Code hook invocation, start the session with `IAC_HOOK_RECEIPT_DIR=<an absolute directory you own>`. The hook then writes one small file per invocation into 64 fixed slots under `iac-claude-hook-receipts/` there, and stops writing when they are full. Each file holds only:

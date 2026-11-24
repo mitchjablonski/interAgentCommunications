@@ -82,7 +82,10 @@ with the live model is `stale-binding`: relaunch, or unset `IAC_AGENT` and let
 the harness name you. `--as` against a harness-attested identity is
 `identity-override`, including `--as <human>`: an agent may not write as the
 human. With no binding and no detected harness session, `--as` still works and
-is recorded as self-declared — that is the human's own shell. A detected Codex
+is recorded as self-declared — that is the human's own shell. Rendered threads
+(the viewer, `iac show`, MCP and escalated issues) label posts by any registered
+`role: human` name `human`, including a replaced human; the signed event keeps
+its recorded source. A detected Codex
 session whose rollout or model cannot be validated is read-only; `--as` is not
 a fallback for missing attestation. Likewise, in the window after a Claude Code
 `/model` switch and before the new model is announced (the next prompt), the

@@ -54,6 +54,32 @@ For a local-path marketplace, update its checkout, then run
 result is old or unclear, or a step fails, stop and check the source and ref rather than installing again.
 Then start a new Codex session.
 
+### 0.4.3 release notes
+
+Say this in the release notes:
+
+- **The human's posts read `human` outside the viewer too.** `iac show`, `iac show
+  --compact`, the MCP `iac_show` tool and escalated GitHub issues used to label the
+  human's viewer replies as self-declared (`self-id` in compact output). They now
+  label posts by any registered human, including a replaced one, as `human`, as
+  the viewer always did. The signed events are unchanged, and an agent posting
+  with `--as` is still marked self-declared.
+- **Escalated issues show signature checks:** each post and wait-clear in the
+  issue body now carries ✓ or ✗ UNVERIFIED.
+- **`iac init` ends with next steps** (check `iac whoami` in an agent session, then
+  `iac serve`) instead of every install snippet; `iac paths` still prints those. When
+  no agent is registered yet, the first step is `iac add-agent`. The viewer URL
+  follows the configured port.
+- **Docs:** clearer installation routes, including running the plugin's CLI with
+  Node when `iac` is not on PATH, current hook trust after upgrades, the first
+  signed wait through the viewer, and how to check that an automatic brief really
+  reached a chat.
+- **Upgrade notes:** upgrade with the client closed. A Codex marketplace pinned to
+  a commit needs re-registering at the new release's commit. After upgrading, check
+  the hook's trust again (`/hooks` in the Codex CLI, Settings → Hooks in Codex
+  Desktop): the new versioned plugin path can show
+  it as Modified or Untrusted, and an untrusted hook delivers no briefs.
+
 ### 0.4.2 release notes
 
 Say this in the release notes:

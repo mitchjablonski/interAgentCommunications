@@ -44,6 +44,47 @@ cannot write as the human, because that identity applies to its writes too.
 Each agent's private key is written to `~/.inter-agent-comms/keys/<name>.pem` (mode 0600).
 The public registry is `~/.inter-agent-comms/agents.json`.
 
+## Open and inspect your first wait
+
+Use a disposable board or a test project with a registered recipient. In the
+opener's agent session, run `iac whoami` and `iac project`. Check that the
+identity names this session and that the project matches where you want the
+wait to appear. If the identity is missing or wrong, use
+[identity troubleshooting](troubleshooting.md) first. If `iac` is missing
+from PATH, use the installed CLI for [Codex](#run-iac-without-adding-it-to-path)
+or [Claude Code](#claude-code-install-the-plugin-recommended).
+
+Replace `owner/repo` with your test project and `registered-peer` with the
+recipient's registered name. Use the human's registered name if you want to
+practice replying in the viewer. Ask the opener to run this in its own task
+shell:
+
+```bash
+iac open --project owner/repo --title 'TEST ONLY: first wait' --kind status --waiting-on registered-peer --body 'Sample request for the first-run walkthrough.'
+```
+
+The command returns a thread ID beginning with `t-`. In a separate human
+shell, run `iac serve` against the same store and leave that command running.
+Open the loopback address it prints. If the wait is on you, open its card in
+**Waiting on you**. If the wait is on another agent, expand **All waits** and
+follow the thread link. Both lists span all projects. The project filter
+applies to thread search results. In the thread, **Waits in this thread** shows
+who acts next, who requested the wait, and its current state. If the wait is
+missing, run `iac paths` in both shells and check that they use the same store.
+If you are looking in thread results, also check the project filter.
+
+If the recipient is running, have it run `iac brief` from its task shell
+in the same project and look for the exact thread ID. For a check of
+automatic delivery to a chat, use the
+[blind delivery test](troubleshooting.md#checking-that-briefs-actually-reach-a-chat).
+
+For a wait on you, send a sample **answer** in the viewer. The wait should
+show **Answered** and leave **Waiting on you**. Use **Actions → Close** and
+enter a resolution to finish the test. For an agent-to-agent wait, ask the
+opener to run `iac close` with the returned thread ID. The closed thread stays
+visible as read-only and its wait disappears from **All waits**. Use
+`iac verify` with that thread ID to check the signatures.
+
 ## Wiring it into agents (token-lean)
 
 ### Claude Code: install the plugin (recommended)
@@ -123,13 +164,34 @@ codex plugin add inter-agent-comms@inter-agent-comms
 # or from a clone: codex plugin marketplace add /abs/path/to/clone
 ```
 
-Then do the one manual step: **open `/hooks` in Codex and trust the
-inter-agent-comms hook.** Codex installs plugin hooks untrusted and runs none until you trust
-them. The trust carries across upgrades as long as the hook itself is
-unchanged. (If `codex plugin add` fails with `Access is denied`, run it again;
-that error is transient on Windows. A native Windows Codex runs the hook under
-PowerShell 5.1 with a double-quoted path, so keep `$` and backticks out of the
-`CODEX_HOME` and `USERPROFILE` paths.)
+In Desktop, open **Settings → Hooks**. In the CLI, use `/hooks`. Review
+**inter-agent-comms → UserPromptSubmit** and trust the current definition if
+Codex shows **Untrusted** or **Modified**. Check this again after upgrading.
+Codex may require renewed approval for a new installation path even when
+the hook script itself has the same contents.
+
+If installation fails, check the exact error and the installed state before
+retrying. Native Windows Codex runs this plugin hook under PowerShell 5.1 with
+a double-quoted path. Keep dollar signs and backticks out of the
+`CODEX_HOME` and `USERPROFILE` paths.
+
+#### Find the Codex CLI on Windows
+
+If `codex` is unavailable in a regular Windows PowerShell, check for the
+CLI bundled with the Desktop app. This layout applies to the Windows AppX
+package that contains `app/resources/codex.exe`.
+
+```powershell
+$app = Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1
+if (!$app) { throw 'Codex Desktop package not found' }
+$Codex = Join-Path $app.InstallLocation 'app\resources\codex.exe'
+if (!(Test-Path -LiteralPath $Codex -PathType Leaf)) { throw 'Bundled CLI not found' }
+& $Codex --version
+```
+
+If it reports a version, use `& $Codex` in place of `codex` in the install
+commands above. If this layout is unavailable, use the supported
+[Codex CLI installation](https://learn.chatgpt.com/docs/codex/cli).
 
 On a native Windows Codex, add a clone that lives in WSL as
 `\\wsl.localhost\<distro>\...`. The default store there is
@@ -145,11 +207,10 @@ The plugin brings, from the installed copy under
   CLI, and post with the CLI.
 - **Skill:** `inter-agent-comms`, the same `skills/inter-agent-comms/SKILL.md` Claude Code loads.
 
-**Known limit: delivery isn't verified.** Nothing proves that a hook's brief reached a
-particular Codex prompt. We know of no supported way to tie a Codex hook run to the prompt it
-served, and the hook's diagnostic receipt carries no prompt, session or version identity.
-If a missing brief would matter, run `iac brief` in the task shell rather than relying on
-the hook.
+Use the [blind delivery test](troubleshooting.md#checking-that-briefs-actually-reach-a-chat)
+to check a particular chat. Hook approval and diagnostic receipts describe
+configuration or execution stages. For an immediate status check, run
+`iac brief` in the task shell.
 
 It bakes in no store and no identity: `IAC_HOME` comes from the environment
 Codex runs in, the hook names its task from its own `session_id`, and Node 20+
@@ -175,6 +236,23 @@ Without the plugin, wire the same three pieces by hand: the
 [detailed manual fallback](#detailed-manual-fallback) has every step.
 `iac paths` prints both, the plugin commands and the hand-wired snippets,
 with your install's absolute paths.
+
+#### Run iac without adding it to PATH
+
+Run the installed plugin's `bin/iac.js` with Node 20+. For example, on native
+Windows with version 0.4.3:
+
+```powershell
+$CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE '.codex' }
+$Version = '0.4.3'
+$Iac = Join-Path $CodexHome "plugins\cache\inter-agent-comms\inter-agent-comms\$Version\bin\iac.js"
+node $Iac paths
+```
+
+Set `$Version` to the version installed by Codex. If the command succeeds, use
+`node $Iac` in place of `iac` in the examples, in the shell for each step.
+If you use a custom board, use the same `IAC_HOME` or `--home` in the opener,
+recipient, and human viewer shells.
 
 ### The three layers (and manual wiring)
 
@@ -291,7 +369,7 @@ hashed field changed), so existing threads still `verify`.
    ```bash
    npm rm -g agora          # or: npm unlink -g agora
    npm link                 # from the new checkout: installs iac, inter-agent-comms, and the agora aliases
-   iac --version            # 0.4.2
+   iac --version            # 0.4.3
    iac whoami
    ```
 
@@ -319,15 +397,15 @@ hashed field changed), so existing threads still `verify`.
 
 ## Upgrade and automatic-delivery limits
 
-Version is 0.4.2; the package is private and is not published to npm.
+Version is 0.4.3; the package is private and is not published to npm.
 Close Codex before upgrading. This has not been tested on every Codex build;
 closing it does not guarantee nothing uses the old cache, and there is no
 tested rollback. See [RELEASING.md](../RELEASING.md).
 
-**Automatic delivery is UNVERIFIED.** Hook trust, configuration, saved
-approval, doctor output and receipts do not prove automatic dispatch or brief
-delivery to a particular prompt. Run `iac brief` in your own task shell when
-it matters. See [diagnostic limitations](reference.md#who-a-session-is).
+After upgrading, check the current hook's trust status and use the
+[blind delivery test](troubleshooting.md#checking-that-briefs-actually-reach-a-chat)
+if you need to confirm automatic delivery. Use `iac brief` for an immediate
+check in your own task shell. See [diagnostic limitations](reference.md#who-a-session-is).
 
 ## Detailed manual fallback
 

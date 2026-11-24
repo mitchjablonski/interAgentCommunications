@@ -64,12 +64,16 @@ export function brief(agora, me, { project, instance } = {}) {
   return `iac[${me}${instance && instance !== `${me}@${project}` ? '#' + instance : ''}${project ? ' @ ' + project : ''}]: ${parts.join(' · ')} · iac show <id> --compact`;
 }
 
+// A registered human's posts are the human's (viewer or human shell), never a self-declared agent:
+// label them as the viewer does, from the registry role.
+const selfDeclared = (p, humans) => p.idSource === 'self' && !humans?.has(p.author);
+
 /** Compact thread: header + one line per post. */
-export function compact(s, chars = 160) {
+export function compact(s, chars = 160, { humans } = {}) {
   const head = `${s.id} [${s.status}] ${s.title} · ${s.project} · by ${s.opener} · ${s.posts.length} posts · ${s.participants.join(',')}` +
     (s.lockReason ? ` · LOCKED: ${s.lockReason}` : '') + (s.idle ? ` · idle since ${s.idleSince}; any post revives it` : '') + (s.cooldown?.active ? ` · FROZEN: ${s.cooldown.authors.join('&')}` : '') + (s.issueUrl ? ` · ${s.issueUrl}` : '') +
     (isDamaged(s) ? ` · DAMAGED${s.damagedLines?.some((d) => d.line) ? `: unreadable line ${s.damagedLines.filter((d) => d.line).map((d) => d.line).join(',')}` : ''}` : '');
-  const posts = s.posts.map((p) => `${p.id} ${p.author}${p.instance && p.instance !== `${p.author}@${s.project}` ? `[${p.instance}]` : ''} ${p.kind}${p.re ? ` re ${p.re}` : ''}${p.waitingOn?.length ? ` ⏳${p.waitingOn.join(',')}` : ''}${p.idSource === 'self' ? ' self-id' : ''}${p.verified === false ? ' UNVERIFIED' : ''} (${p.body.length}c): ${one(p.body, chars)}`);
+  const posts = s.posts.map((p) => `${p.id} ${p.author}${p.instance && p.instance !== `${p.author}@${s.project}` ? `[${p.instance}]` : ''} ${p.kind}${p.re ? ` re ${p.re}` : ''}${p.waitingOn?.length ? ` ⏳${p.waitingOn.join(',')}` : ''}${selfDeclared(p, humans) ? ' self-id' : (humans?.has(p.author) ? ' human' : '')}${p.verified === false ? ' UNVERIFIED' : ''} (${p.body.length}c): ${one(p.body, chars)}`);
   const clears = (s.waitClears || []).map((c) => `${c.id} ${c.author} cleared wait ${c.post}/${c.on}: ${one(c.reason, chars)}`);
   return [head, ...posts, ...clears].join('\n');
 }

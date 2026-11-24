@@ -2205,6 +2205,20 @@ test('init hints when a registered agent matches no family, and stays quiet when
   assert.match(text, /hint: alpha matches no family/);
   assert.match(text, /read-only unless bound with iac-launch/, 'a launcher binding can still write as it');
   assert.match(text, /iac set-models alpha --models '<glob>' --harness claude-code\|codex/);
+  // it ends with the next steps, not the full paths dump (that is `iac paths`)
+  assert.match(text, /\nnext:\n {2}1\. in an agent session \(or its task shell\): iac whoami — it should name that agent\n {2}2\. from your own shell, outside any agent: iac serve/);
+  assert.match(text, /plugin commands, absolute paths and manual wiring: iac paths\n/);
+  assert.doesNotMatch(text, /^cli: |\/plugin marketplace add|Copy-Item/m, 'no paths dump or install snippets in init output');
+  assert.match(text, /iac serve — then open http:\/\/127\.0\.0\.1:4747\n/);
+  assert.match(text, /a launcher instead of a harness plugin: iac set-launch <agent> -- <command\.\.\.>/);
+  // human-only init (the README's Codex route) leads with registering an agent; the URL follows config.port
+  const solo = fs.mkdtempSync(path.join(os.tmpdir(), 'iac-init-'));
+  const first = (await run(process.execPath, [bin, 'init', '--human', 'ada'], { env: { ...process.env, IAC_HOME: solo } })).stdout;
+  assert.match(first, /\nnext:\n {2}1\. register an agent for each model family that will post, e\.g\. for Codex: iac add-agent <name> --models '<glob>' --harness codex\n {2}2\. in that agent's session/);
+  const cfgPath = path.join(solo, 'config.json'); const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  fs.writeFileSync(cfgPath, JSON.stringify({ ...cfg, port: 5999 }));
+  const again = (await run(process.execPath, [bin, 'init', '--force'], { env: { ...process.env, IAC_HOME: solo } })).stdout;
+  assert.match(again, /iac serve — then open http:\/\/127\.0\.0\.1:5999\n/);
 });
 
 test('CLI unwait infers one owned wait and requires selectors when ambiguous', async () => {
@@ -2524,6 +2538,42 @@ test('a harness-named session writes with idSource harness, inside the signature
   assert.doesNotMatch(compact(a.threadWithVerification(thread)), /self-id/, 'harness-attested identity carries no self-id badge');
   const { renderMarkdown } = await import('../src/api.js');
   assert.doesNotMatch(renderMarkdown(a.thread(thread)), /self-declared/);
+});
+
+test('the registered human is labelled human in rendered threads, not self-declared (as in the viewer)', async () => {
+  const { a } = fresh();
+  const human = a.config().human;
+  const { thread } = await a.open({ as: 'opus', title: 'need a decision', body: 'over to you', waitingOn: [human], project: 'o/r' });
+  await a.post({ as: human, thread, kind: 'answer', body: 'use v2' });
+  await a.post({ as: 'fable', thread, kind: 'status', body: 'noted' });
+  const { compact } = await import('../src/format.js');
+  const { renderMarkdown } = await import('../src/api.js');
+  const s = a.threadWithVerification(thread); const humans = a.humanNames();
+  assert.deepEqual([...humans], [human]);
+  const lines = compact(s, undefined, { humans }).split('\n');
+  assert.match(lines.find((l) => l.includes(` ${human} answer`)), new RegExp(` ${human} answer human \\(`), 'compact');
+  assert.match(lines.find((l) => l.includes(' fable status')), / fable status self-id /, 'an --as agent stays self-declared');
+  const md = renderMarkdown(s, { verified: true, humans });
+  assert.match(md, new RegExp(`\\*\\*${human}\\*\\* · answer · [^\\n]* · human ✓`));
+  assert.match(md, /\*\*fable\*\* · status · [^\n]* · identity self-declared/);
+  // without the registry the renderers fall back to the signed idSource, as before
+  assert.match(compact(s), new RegExp(` ${human} answer self-id`));
+  assert.match(renderMarkdown(s), new RegExp(`\\*\\*${human}\\*\\* · answer · [^\\n]* · identity self-declared`));
+  // the delivering call sites pass the registry: MCP iac_show (compact and full), the CLI, and escalate
+  const { buildTools } = await import('../src/mcp.js');
+  const show = buildTools(a, '').iac_show.run;
+  assert.match(show({ thread }), new RegExp(` ${human} answer human \\(`), 'MCP compact');
+  assert.match(show({ thread, full: true }), new RegExp(`\\*\\*${human}\\*\\* · answer · [^\\n]* · human ✓`), 'MCP full');
+  const env = { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT, ...HARNESS_CLEAN, IAC_HOME: a.store.home };
+  const cli = spawnSync(process.execPath, [binPath('iac.js'), 'show', thread, '--compact'], { env, encoding: 'utf8', timeout: 20_000 });
+  assert.match(cli.stdout, new RegExp(` ${human} answer human \\(`), 'CLI show --compact');
+  let issue = null;
+  await a.escalate({ as: 'opus', thread, repo: 'o/r', createIssue: async (x) => { issue = x; return 'https://example.invalid/escalated'; } });
+  assert.match(issue.body, new RegExp(`\\*\\*${human}\\*\\* · answer · [^\\n]* · human ✓`), 'escalated issue body, verified');
+  // a replaced human keeps role human in the registry, so its earlier posts still read human (as in the viewer)
+  a.init({ human: 'zed', force: true, replaceHuman: true });
+  assert.deepEqual([...a.humanNames()].sort(), [human, 'zed'].sort());
+  assert.match(compact(a.threadWithVerification(thread), undefined, { humans: a.humanNames() }), new RegExp(` ${human} answer human \\(`));
 });
 
 test('a launcher binding that disagrees with the live model is refused as stale, not resolved', async () => {
@@ -5162,7 +5212,7 @@ const runBin = (name, args, { env = {}, input } = {}) => spawnSync(process.execP
 
 test('package bins: iac and inter-agent-comms share one entry; agora, agora-mcp, agora-launch remain as aliases', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.4.2');
+  assert.equal(pkg.version, '0.4.3');
   assert.deepEqual(pkg.bin, {
     iac: 'bin/iac.js', 'inter-agent-comms': 'bin/iac.js', 'iac-mcp': 'bin/iac-mcp.js', 'iac-launch': 'bin/iac-launch.js',
     agora: 'bin/agora.js', 'agora-mcp': 'bin/agora-mcp.js', 'agora-launch': 'bin/agora-launch.js',
@@ -5180,7 +5230,7 @@ test('the agora alias runs the same CLI against the same store; a non-interactiv
     assert.equal(r.status, 0, r.stderr); assert.match(r.stdout, new RegExp(thread)); assert.equal(r.stderr, '', `${name}: stderr is not a TTY, so no notice`);
   }
   assert.match(runBin('agora.js', ['--help']).stdout, /^iac \(inter-agent-comms\)/);
-  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.2\n', `${name} --version`);
+  for (const name of ['iac.js', 'agora.js']) assert.equal(runBin(name, ['--version']).stdout, '0.4.3\n', `${name} --version`);
 });
 
 test('deprecation notice: interactive agora only, never in hook or MCP modes', async () => {
@@ -6399,16 +6449,16 @@ test('doctor: plugin versions against the CLI, stale gated hooks, duplicate hook
     const withTable = async (body) => { fs.writeFileSync(cfg, orig + '\n[marketplaces.inter-agent-comms]\n' + body); return check(await runDoctor({ home, env }), 'plugin-codex'); };
     const hedged = (c, why) => { assert.doesNotMatch(c.message, /pinned/, why); assert.match(c.fix, /unless the marketplace is pinned/, why); };
     try {
-      const pinned = await withTable('source_type = "git"\nsource = "https://x.invalid/repo.git"\nref = "d7d1454c51d2cb398fe429ba116a1977ef50567b"\n');
-      assert.match(pinned.message, /marketplace is pinned to commit d7d1454c51d2, so marketplace upgrade will not move it/);
+      const pinned = await withTable('source_type = "git"\nsource = "https://x.invalid/repo.git"\nref = "0123456789abcdef0123456789abcdef01234567"\n');
+      assert.match(pinned.message, /marketplace is pinned to commit 0123456789ab, so marketplace upgrade will not move it/);
       assert.match(pinned.fix, /re-register the inter-agent-comms marketplace pinned to the new release's commit/); assert.doesNotMatch(pinned.fix, /marketplace upgrade/);
       assert.doesNotMatch(pinned.message, /x\.invalid/, 'the source URL is never printed');
       // single quotes, a trailing comment and CRLF are read the same way
-      assert.match((await withTable("source_type = 'git'\r\nref = 'D7D1454C51D2CB398FE429BA116A1977EF50567B' # pinned\r\n")).message, /pinned to commit D7D1454C51D2/);
+      assert.match((await withTable("source_type = 'git'\r\nref = '0123456789ABCDEF0123456789ABCDEF01234567' # pinned\r\n")).message, /pinned to commit 0123456789AB/);
       hedged(await withTable('source_type = "git"\nref = "main"\n'), 'a branch ref still moves on upgrade');
       hedged(await withTable('ref = "ghp_notarealtokenbutlooksone0000000000"\n'), 'a non-commit value is never printed');
-      hedged(await withTable('source_type = "local"\nref = "d7d1454c51d2cb398fe429ba116a1977ef50567b"\n'), 'a local-path marketplace keeps the checkout advice');
-      hedged(await withTable('source_type = "git"\n\n[marketplaces.inter-agent-comms.extra]\nref = "d7d1454c51d2cb398fe429ba116a1977ef50567b"\n'), 'a ref in a nested table is not the pin');
+      hedged(await withTable('source_type = "local"\nref = "0123456789abcdef0123456789abcdef01234567"\n'), 'a local-path marketplace keeps the checkout advice');
+      hedged(await withTable('source_type = "git"\n\n[marketplaces.inter-agent-comms.extra]\nref = "0123456789abcdef0123456789abcdef01234567"\n'), 'a ref in a nested table is not the pin');
     } finally { fs.writeFileSync(cfg, orig); }
   }
   const hc = check(r, 'hooks-claude');

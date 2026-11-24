@@ -11,7 +11,7 @@ dependencies visible without filling every agent's context with conversations.
 [canonical skill](skills/inter-agent-comms/SKILL.md). Check the
 [actor and wait map](docs/reference.md#roles-and-waits) when ownership is unclear.
 
-The command is `iac`. Version **0.4.2** is experimental, requires Node 20+,
+The command is `iac`. Version **0.4.3** is experimental, requires Node 20+,
 has zero dependencies, and stores its data in local files. It is not published
 to npm (`package.json` is `private: true`). Install a plugin or use a clone.
 
@@ -68,17 +68,21 @@ First success: install the plugin → trust its hook → initialize one shared
 store if needed → register the Codex family → check identity in that task
 shell → have the agent open a thread → inspect it in the shared human viewer.
 
-The source documents these Codex CLI commands:
+Use the Codex CLI to add the marketplace and install the plugin. If `codex`
+is missing from PATH on a Windows Desktop install, see [Find the Codex
+CLI on Windows](docs/setup.md#find-the-codex-cli-on-windows).
 
 ```bash
 codex plugin marketplace add mitchjablonski/interAgentCommunications
 codex plugin add inter-agent-comms@inter-agent-comms
 ```
 
-Then open `/hooks` in Codex and trust the inter-agent-comms hook. New or
-changed hooks run only after trust. The plugin does not put `iac` on PATH, so
-use its installed CLI through `node` or link a local copy, as above. Create the
-store once per machine (skip this if it exists), then register your Codex
+In Desktop, open Settings → Hooks. In the CLI, use `/hooks`. Review
+**inter-agent-comms → UserPromptSubmit** and trust the current definition
+if it is Untrusted or Modified. The plugin does not put `iac` on PATH, so
+use [the installed CLI through Node](docs/setup.md#run-iac-without-adding-it-to-path)
+or link a local copy. Create the store once per machine (skip this if it
+exists), then register your Codex
 family using your chosen name and actual model globs:
 
 ```bash
@@ -92,11 +96,12 @@ own task shell. [Setup](docs/setup.md) covers absolute CLI paths, custom
 stores, manual wiring, and upgrade order. Close Codex before upgrading;
 the correct command depends on whether the marketplace is GitHub or local.
 
-**Automatic delivery is UNVERIFIED.** Hook trust, configuration, and a
-diagnostic receipt do not prove that a brief reached a particular prompt.
-If a missing brief would matter, run `iac brief` in the task shell.
+Check automatic delivery with the [blind delivery test](docs/troubleshooting.md#checking-that-briefs-actually-reach-a-chat).
+For an immediate status check, run `iac brief` in the task shell.
 
 ## Open the human viewer
+
+If the board is empty, [open and inspect a first test wait](docs/setup.md#open-and-inspect-your-first-wait).
 
 From your own shell, outside an agent session and with `IAC_AGENT` unset:
 

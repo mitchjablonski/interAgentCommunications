@@ -49,7 +49,8 @@ export function buildTools(agora, me, session = null, ctx = null) {
       const s = agora.threadWithVerification(thread);
       if (!s) throw new Error(`no such thread: ${thread}`);
       if (post_id) { const p = s.posts.find((x) => x.id === post_id); if (!p) throw new Error(`no post ${post_id} in ${thread}`); return `${p.id} ${p.author} ${p.kind} ${p.ts}${p.verified ? '' : ' UNVERIFIED'}\n${p.body}`; }
-      return full ? renderMarkdown(s, { verified: true }) : compact(s);
+      const humans = agora.humanNames();
+      return full ? renderMarkdown(s, { verified: true, humans }) : compact(s, undefined, { humans });
     },
   };
   T.iac_list = {

@@ -854,6 +854,8 @@ export class Agora {
   }
   registry() { return this.store.registry(); }
   roleOf(name) { return this.registry()[name]?.role || (this.registry()[name] ? 'agent' : null); }
+  /** Registered human names, for labelling their posts in rendered threads. */
+  humanNames() { const reg = this.registry(); return new Set(Object.keys(reg).filter((k) => reg[k]?.role === 'human')); }
   /**
    * Who the human is now: config.human when it names a registered human. A human replaced with
    * `init --replace-human` stays registered (its signed posts keep verifying, and past events
@@ -1274,7 +1276,8 @@ export class Agora {
     if (state.closed) throw new Rejected('closed', 'thread is closed');
     const r = repo || this.config().repo;
     if (!r) throw new Error('no repo: pass --repo owner/name or set "repo" in config.json');
-    const md = renderMarkdown(state, { forIssue: true });
+    // verified: a post under the human's name that fails its signature must not read as plain `human` on GitHub
+    const md = renderMarkdown(this.threadWithVerification(thread) || state, { forIssue: true, verified: true, humans: this.humanNames() });
     const url = await createIssue({ repo: r, title: title || `[iac] ${state.title}`, body: md, labels: ['iac', ...labels] });
     // The handoff and the close go in under one lock: the closing post decides who is woken,
     // so a concurrent post must not slip in between them.
@@ -1580,7 +1583,7 @@ function eventInstance(event, project) {
 
 // ---- rendering --------------------------------------------------------------
 
-export function renderMarkdown(s, { forIssue = false, verified } = {}) {
+export function renderMarkdown(s, { forIssue = false, verified, humans } = {}) {
   const lines = [];
   lines.push(`# ${s.id} · ${s.title}   [${s.status}]`);
   lines.push(`project: ${s.project} · opener: ${s.opener} · created: ${s.created} · posts: ${s.posts.length} · participants: ${s.participants.join(', ')}`);
@@ -1597,7 +1600,8 @@ export function renderMarkdown(s, { forIssue = false, verified } = {}) {
     const ms = p.mentions?.length ? ' · ' + p.mentions.map((m) => '@' + m).join(' ') : '';
     const wo = p.waitingOn?.length ? ` · ⏳ waiting on ${p.waitingOn.map((w) => `${w} (any instance in ${s.project})`).join(', ')}` : '';
     const inst = p.instance && p.instance !== `${p.author}@${s.project}` ? ` [${p.instance}]` : '';
-    const src = p.idSource === 'self' ? ' · identity self-declared' : '';
+    // the registered human writes through the viewer or a human shell: label it as the viewer does
+    const src = humans?.has(p.author) ? ' · human' : p.idSource === 'self' ? ' · identity self-declared' : '';
     lines.push(`### ${p.id} · **${p.author}**${inst} · ${p.kind} · ${p.ts}${re}${ms}${wo}${src}${badge}`);
     lines.push(p.body.trim());
     lines.push('');

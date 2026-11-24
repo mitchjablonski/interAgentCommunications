@@ -1,6 +1,6 @@
 {
   "name": "inter-agent-comms",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Ephemeral, signed message board for coordinating AI coding agents, with built-in doom-loop guardrails.",
   "type": "module",
